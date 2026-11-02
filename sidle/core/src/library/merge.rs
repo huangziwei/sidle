@@ -278,7 +278,7 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
         &db::NewBook {
             sha256: sha,
             title: &row.title,
-            author: &row.author,
+            credits: &row.credits,
             language: &row.language,
             ppd: row.ppd.as_deref(),
             epub_path: epub.as_deref(),
@@ -330,11 +330,14 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
         .or(source.amazon_asin.as_deref().filter(|a| !a.is_empty()));
     let tags_json =
         serde_json::to_string(&source.tags).map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
+    let credits_json = serde_json::to_string(&source.credits)
+        .map_err(|e| anyhow::anyhow!("serialize credits: {e}"))?;
     conn.execute(
         r#"UPDATE books SET
                title = ?1, author = ?2, language = ?3, ppd = ?4, publisher = ?5,
                published_at = ?6, series_name = ?7, series_index = ?8, tags = ?9,
-               amazon_asin = ?10, title_romaji = ?11, author_romaji = ?12, updated_at = ?13
+               amazon_asin = ?10, title_romaji = ?11, author_romaji = ?12, updated_at = ?13,
+               credits = ?15
            WHERE id = ?14"#,
         params![
             source.title,
@@ -351,6 +354,7 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
             source.author_romaji,
             source.updated_at,
             local.id,
+            credits_json,
         ],
     )?;
     Ok(())
@@ -471,7 +475,7 @@ mod tests {
                 &db::NewBook {
                     sha256: sha,
                     title,
-                    author: "Author",
+                    credits: &crate::library::credits::from_author_line("Author"),
                     language: "en",
                     ppd: None,
                     epub_path: Some(&epub.to_string_lossy()),

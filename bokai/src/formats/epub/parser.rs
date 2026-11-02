@@ -61,9 +61,10 @@ pub fn parse_container_xml(bytes: &[u8]) -> io::Result<String> {
 #[derive(Debug, Clone)]
 enum MetaElement {
     Title,
-    /// Index into `metadata.authors`.
+    /// Index into `metadata.creators`.
     Creator(usize),
-    Contributor(String),
+    /// Index into `metadata.contributors`.
+    Contributor(usize),
     Collection,
 }
 
@@ -115,13 +116,13 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut identifiers_by_id: HashMap<String, String> = HashMap::new();
     // `scheme` of the open `<dc:identifier>`; `ASIN` and `MOBI-ASIN` route to `metadata.asin`.
     let mut current_identifier_scheme: Option<String> = None;
-    // `file-as` of the open `<dc:title>` / `<dc:creator>`, applied at its close.
+    // `file-as` of the open `<dc:title>` / `<dc:creator>` / `<dc:contributor>`, and
+    // the `role` of either credit, applied at its close.
     let mut current_file_as: Option<String> = None;
+    let mut current_role: Option<String> = None;
     // `opf:event` of the open `<dc:date>`, and the rank of `metadata.date`.
     let mut current_date_event: Option<String> = None;
     let mut date_rank: Option<u8> = None;
-    // One sort-key slot per `<dc:creator>`, parallel to `metadata.authors`.
-    let mut author_sort_slots: Vec<Option<String>> = Vec::new();
     let mut buf_text = String::new();
 
     // The open `<meta>` whose value is its text.
@@ -347,7 +348,9 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         current_element_id = None;
                         current_identifier_scheme = None;
                         current_file_as = None;
+                        current_role = None;
                         current_date_event = None;
+                        let credit = local == b"creator" || local == b"contributor";
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
                             if key == b"id" {
@@ -365,10 +368,14 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
                                 );
-                            } else if (local == b"title" || local == b"creator")
-                                && local_name(key) == b"file-as"
+                            } else if (local == b"title" || credit) && local_name(key) == b"file-as"
                             {
                                 current_file_as = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            } else if credit && local_name(key) == b"role" {
+                                current_role = Some(
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
                                 );
@@ -492,26 +499,24 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                                 metadata.title_sort = Some(file_as);
                             }
                         }
-                        "creator" => {
-                            let author_index = metadata.authors.len();
-                            metadata.authors.push(text);
-                            if let Some(ref id) = current_element_id {
-                                element_ids.insert(id.clone(), MetaElement::Creator(author_index));
+                        "creator" | "contributor" => {
+                            let mut credit = Contributor {
+                                file_as: current_file_as.take(),
+                                ..Contributor::named(text)
+                            };
+                            if let Some(role) = current_role.take() {
+                                add_role(&mut credit, &role);
                             }
-                            author_sort_slots.push(current_file_as.take());
-                        }
-                        "contributor" => {
-                            // Store contributor for later refinement processing
+                            let (list, element): (_, fn(usize) -> MetaElement) =
+                                if elem == "creator" {
+                                    (&mut metadata.creators, MetaElement::Creator)
+                                } else {
+                                    (&mut metadata.contributors, MetaElement::Contributor)
+                                };
                             if let Some(ref id) = current_element_id {
-                                element_ids
-                                    .insert(id.clone(), MetaElement::Contributor(text.clone()));
+                                element_ids.insert(id.clone(), element(list.len()));
                             }
-                            // Add basic contributor without role
-                            metadata.contributors.push(Contributor {
-                                name: text,
-                                file_as: None,
-                                role: None,
-                            });
+                            list.push(credit);
                         }
                         "language" => metadata.language = text,
                         "identifier" => {
@@ -563,22 +568,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     }
 
     // Apply refinements to their target elements
-    apply_refinements(
-        &mut metadata,
-        &mut author_sort_slots,
-        &element_ids,
-        &refinements,
-    );
-
-    // `author_sort_slots` drops its trailing `None`s; an inner `None` takes its author's name.
-    while author_sort_slots.last().is_some_and(Option::is_none) {
-        author_sort_slots.pop();
-    }
-    metadata.author_sorts = author_sort_slots
-        .into_iter()
-        .enumerate()
-        .map(|(i, slot)| slot.unwrap_or_else(|| metadata.authors[i].clone()))
-        .collect();
+    apply_refinements(&mut metadata, &element_ids, &refinements);
 
     // Detect cover image (EPUB3 property takes priority)
     let epub3_cover = manifest.values().find(|item| {
@@ -730,10 +720,17 @@ fn handle_meta_property(
     }
 }
 
+/// Add `role`, trimmed, to the credit's roles unless it is blank or among them.
+fn add_role(credit: &mut Contributor, role: &str) {
+    let role = role.trim();
+    if !role.is_empty() && !credit.has_role(role) {
+        credit.roles.push(role.to_string());
+    }
+}
+
 /// Apply collected refinements to their target elements.
 fn apply_refinements(
     metadata: &mut Metadata,
-    author_sort_slots: &mut [Option<String>],
     element_ids: &HashMap<String, MetaElement>,
     refinements: &[Refinement],
 ) {
@@ -751,24 +748,19 @@ fn apply_refinements(
                         metadata.title_sort = Some(refinement.value.clone());
                     }
                 }
-                MetaElement::Creator(index) => {
-                    if prop_local == "file-as"
-                        && let Some(slot) = author_sort_slots.get_mut(*index)
-                    {
-                        *slot = Some(refinement.value.clone());
-                    }
-                }
-                MetaElement::Contributor(name) => {
-                    // Find the contributor and update it
-                    for contrib in &mut metadata.contributors {
-                        if contrib.name == *name {
-                            match prop_local {
-                                "role" => contrib.role = Some(refinement.value.clone()),
-                                "file-as" => contrib.file_as = Some(refinement.value.clone()),
-                                _ => {}
-                            }
-                            break;
-                        }
+                MetaElement::Creator(index) | MetaElement::Contributor(index) => {
+                    let list = if matches!(elem, MetaElement::Creator(_)) {
+                        &mut metadata.creators
+                    } else {
+                        &mut metadata.contributors
+                    };
+                    let Some(credit) = list.get_mut(*index) else {
+                        continue;
+                    };
+                    match prop_local {
+                        "role" => add_role(credit, &refinement.value),
+                        "file-as" => credit.file_as = Some(refinement.value.clone()),
+                        _ => {}
                     }
                 }
                 MetaElement::Collection => {
@@ -1537,7 +1529,10 @@ mod tests {
         let result = parse_opf(opf).unwrap();
 
         assert_eq!(result.metadata.title, "Test Book");
-        assert_eq!(result.metadata.authors, vec!["Author One", "Author Two"]);
+        assert_eq!(
+            result.metadata.creator_names(),
+            ["Author One", "Author Two"]
+        );
         assert_eq!(result.metadata.language, "en");
         assert_eq!(result.metadata.identifier, "urn:isbn:1234567890");
         assert_eq!(
@@ -1693,7 +1688,7 @@ mod tests {
 </package>"#;
         let m = parse_opf(opf).unwrap().metadata;
         assert_eq!(m.title, "Pride & Prejudice");
-        assert_eq!(m.authors, ["Smith & Jones"]);
+        assert_eq!(m.creator_names(), ["Smith & Jones"]);
         assert_eq!(m.publisher.as_deref(), Some("Acme & Sons"));
 
         let ncx = r#"<ncx><navMap><navPoint id="n1"><navLabel><text> Q &amp; A </text></navLabel><content src="a.xhtml"/></navPoint></navMap></ncx>"#;
@@ -2298,10 +2293,7 @@ mod tests {
         let result = parse_opf(opf).unwrap();
         assert_eq!(result.metadata.contributors.len(), 1);
         assert_eq!(result.metadata.contributors[0].name, "John Translator");
-        assert_eq!(
-            result.metadata.contributors[0].role,
-            Some("trl".to_string())
-        );
+        assert_eq!(result.metadata.contributors[0].roles, ["trl"]);
         assert_eq!(
             result.metadata.contributors[0].file_as,
             Some("Translator, John".to_string())
@@ -2373,13 +2365,13 @@ mod tests {
 </package>"##;
 
         let result = parse_opf(opf).unwrap();
-        assert_eq!(result.metadata.authors, vec!["Jane Doe"]);
-        assert_eq!(result.metadata.author_sorts, vec!["Doe, Jane"]);
+        assert_eq!(result.metadata.creator_names(), ["Jane Doe"]);
+        assert_eq!(result.metadata.creator_sort_keys(), ["Doe, Jane"]);
     }
 
     #[test]
     fn test_parse_opf_author_file_as_per_creator() {
-        // Each creator's `file-as` refinement fills its own `author_sorts` slot.
+        // Each creator's `file-as` refinement keys that creator alone.
         let opf = r##"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -2398,18 +2390,67 @@ mod tests {
 
         let result = parse_opf(opf).unwrap();
         assert_eq!(
-            result.metadata.authors,
-            vec!["サン・テグジュペリ", "管 啓次郎"]
+            result.metadata.creator_names(),
+            ["サン・テグジュペリ", "管 啓次郎"]
         );
         assert_eq!(
-            result.metadata.author_sorts,
-            vec!["サン テグジュペリ", "スガ ケイジロウ"]
+            result.metadata.creator_sort_keys(),
+            ["サン テグジュペリ", "スガ ケイジロウ"]
         );
     }
 
     #[test]
+    fn creator_roles_come_from_refinements_and_epub2_attributes() {
+        let opf = r##"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>T</dc:title>
+    <dc:creator id="creator01">山田 太郎</dc:creator>
+    <dc:creator id="creator02">絵師 花子</dc:creator>
+    <dc:creator opf:role="aut" id="c3">Ann Two</dc:creator>
+    <dc:creator id="c4">Ann Writer</dc:creator>
+    <dc:creator>Unroled</dc:creator>
+    <dc:contributor opf:role="bkp" opf:file-as="calibre">calibre (7.23.0)</dc:contributor>
+    <meta refines="#creator01" property="role" scheme="marc:relators">aut</meta>
+    <meta refines="#creator02" property="role" scheme="marc:relators"> ill </meta>
+    <meta refines="#c3" property="role" scheme="marc:relators">aut</meta>
+    <meta refines="#c4" property="role" scheme="marc:relators">aut</meta>
+    <meta refines="#c4" property="role" scheme="marc:relators">dto</meta>
+    <meta refines="#missing" property="role" scheme="marc:relators">ill</meta>
+    <dc:language>ja</dc:language>
+  </metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"##;
+        let m = parse_opf(opf).unwrap().metadata;
+        let roles: Vec<(&str, Vec<&str>)> = m
+            .creators
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.roles.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                ("山田 太郎", vec!["aut"]),
+                ("絵師 花子", vec!["ill"]),
+                ("Ann Two", vec!["aut"]),
+                ("Ann Writer", vec!["aut", "dto"]),
+                ("Unroled", vec![]),
+            ],
+            "a refinement naming no element is dropped; the attribute and a refinement stating the same role count once"
+        );
+        assert_eq!(m.contributors[0].roles, ["bkp"]);
+        assert_eq!(m.contributors[0].file_as.as_deref(), Some("calibre"));
+    }
+
+    #[test]
     fn test_parse_opf_author_file_as_first_only() {
-        // `opf:file-as` on the first creator only yields a 1-entry vec.
+        // `opf:file-as` on the first creator only keys that creator.
         let opf = r##"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -2425,8 +2466,8 @@ mod tests {
 </package>"##;
 
         let result = parse_opf(opf).unwrap();
-        assert_eq!(result.metadata.authors, vec!["Jane Doe", "John Smith"]);
-        assert_eq!(result.metadata.author_sorts, vec!["Doe, Jane"]);
+        assert_eq!(result.metadata.creator_names(), ["Jane Doe", "John Smith"]);
+        assert_eq!(result.metadata.creator_sort_keys(), ["Doe, Jane"]);
     }
 
     #[test]
@@ -2479,7 +2520,7 @@ mod tests {
             .metadata
             .contributors
             .iter()
-            .find(|c| c.role == Some("trl".to_string()));
+            .find(|c| c.has_role("trl"));
         assert!(translator.is_some());
         assert_eq!(translator.unwrap().name, "Translator Name");
 
@@ -2488,7 +2529,7 @@ mod tests {
             .metadata
             .contributors
             .iter()
-            .find(|c| c.role == Some("edt".to_string()));
+            .find(|c| c.has_role("edt"));
         assert!(editor.is_some());
         assert_eq!(editor.unwrap().name, "Editor Name");
     }

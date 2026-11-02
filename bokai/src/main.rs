@@ -57,29 +57,25 @@ enum Command {
         #[arg(long = "mode", default_value = "fast")]
         merge_mode: String,
 
-        /// Page progression direction for PDF → KFX: `rtl` (Japanese/manga,
-        /// turn pages right-to-left) or `ltr`. Omit for the device default
-        /// (ltr). A scanned or text PDF carries no such metadata.
+        /// Page progression direction for PDF → KFX: `rtl` (Japanese/manga, right-to-left) or
+        /// `ltr`, the default; a PDF states none of its own.
         #[cfg(feature = "pdf")]
         #[arg(long = "ppd")]
         ppd: Option<String>,
 
-        /// Force the book's writing mode (EPUB → KFX): `vertical-rl`,
-        /// `vertical-lr`, `horizontal-lr`, or `horizontal-rl`. A `-rl` mode
-        /// turns pages right-to-left. Omit to keep the source's own mode.
+        /// Force the book's writing mode (EPUB → KFX): `vertical-rl`, `vertical-lr`,
+        /// `horizontal-lr` or `horizontal-rl`, a `-rl` mode turning pages right-to-left.
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
 
-        /// Skip the native EPUB validator pass on EPUB output. By default a
-        /// `→ epub` conversion validates what it wrote and prints the
-        /// error-level findings; the conversion succeeds either way.
+        /// Skip the native EPUB validator pass on EPUB output, which prints its error-level
+        /// findings and never fails the conversion.
         #[cfg(feature = "validate")]
         #[arg(long = "no-validate")]
         no_validate: bool,
 
-        /// Worker threads any one parallel stage may run at once (chapter
-        /// build, image transcode, document synthesis). Each worker holds one
-        /// job's working set. Default 0 = every core the platform reports.
+        /// Worker threads any one parallel stage runs at once (chapter build, image transcode,
+        /// document synthesis); 0, the default, uses every core.
         #[arg(short = 'j', long = "max-workers", default_value_t = 0)]
         max_workers: usize,
     },
@@ -90,10 +86,9 @@ enum Command {
         file: String,
     },
 
-    /// Read the source text at a reading position, without converting the
-    /// book. A coordinate is either a position on the book's own reading axis
-    /// (a KFX position id, a byte offset into a MOBI or KF8 text stream) or
-    /// the `<element>:<offset>` pair an anchor and a TOC entry state.
+    /// Read the source text at a reading position without converting the book: a position
+    /// on its own reading axis (a KFX position id, a MOBI or KF8 text offset) or the
+    /// `<element>:<offset>` pair an anchor and a TOC entry state.
     Position {
         /// Input file (KFX, AZW3, or MOBI)
         file: String,
@@ -149,9 +144,8 @@ enum Command {
     /// always the source format of the named direction.
     #[cfg(feature = "validate")]
     Validate {
-        /// Which conversion direction to interpret. `epub-to-kfx` (default)
-        /// treats the EPUB as ground truth; `kfx-to-epub` treats the KFX as
-        /// ground truth.
+        /// Which conversion direction to read: `epub-to-kfx` (default) takes the EPUB as ground
+        /// truth, `kfx-to-epub` the KFX.
         #[arg(long = "direction", default_value = "epub-to-kfx", global = true)]
         direction: String,
 
@@ -289,9 +283,8 @@ enum KfxOp {
         json: bool,
     },
 
-    /// Compare two containers entity by entity: fragment types, prose, element
-    /// ids and the position fragments. Answers whether B is still the same
-    /// book as A, which `validate` does not.
+    /// Compare two containers entity by entity: fragment types, prose, element ids and the
+    /// position fragments, B against A.
     Diff {
         /// Reference container (A — the before).
         a: String,
@@ -425,11 +418,8 @@ fn reorder_spine_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// `bokai split <input> [--out DIR] [--series NAME]` — print where a
-/// collection divides into volumes, one line per proposed cut; with `--out`,
-/// write the volumes.
-/// Run one in-place EPUB operation: print what changed; with `output`, write
-/// the edited book and report any validator errors the edit introduced.
+/// Run one in-place EPUB operation: print what changed; with `output`, write the edited
+/// book and report any validator errors the edit introduced.
 fn epub_op_cmd<F>(input: &str, output: Option<&str>, what: &str, op: F) -> Result<(), String>
 where
     F: FnOnce(
@@ -627,7 +617,7 @@ enum ValidateCheck {
         details: usize,
     },
 
-    /// Report CSS coverage + class-system richness (class= attr counts, CSS
+    /// Report CSS coverage and class-system richness.
     Style {
         epub: String,
         kfx: String,
@@ -691,7 +681,7 @@ enum ValidateCheck {
         details: usize,
     },
 
-    /// Verify a fixed-layout (manga / comic) KFX produced a conformant
+    /// Verify a fixed-layout (manga / comic) KFX's conformance.
     Fxl {
         epub: String,
         kfx: String,
@@ -941,7 +931,8 @@ struct AssetInfo {
 #[derive(Serialize)]
 struct MetadataInfo {
     title: String,
-    authors: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    creators: Vec<ContributorInfo>,
     language: String,
     identifier: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -962,8 +953,6 @@ struct MetadataInfo {
     contributors: Vec<ContributorInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title_sort: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    author_sorts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     collection: Option<CollectionInfoJson>,
     /// Amazon catalogue id, beside the generic `identifier`.
@@ -991,10 +980,20 @@ struct MetadataInfo {
 #[derive(Serialize)]
 struct ContributorInfo {
     name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    roles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_as: Option<String>,
+}
+
+impl From<&bokai::Contributor> for ContributorInfo {
+    fn from(c: &bokai::Contributor) -> Self {
+        Self {
+            name: c.name.clone(),
+            roles: c.roles.clone(),
+            file_as: c.file_as.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1811,7 +1810,7 @@ fn print_json(book: &mut Book, path: &str) -> Result<(), String> {
         file: path.to_string(),
         metadata: MetadataInfo {
             title: meta.title.clone(),
-            authors: meta.authors.clone(),
+            creators: meta.creators.iter().map(ContributorInfo::from).collect(),
             language: meta.language.clone(),
             identifier: meta.identifier.clone(),
             publisher: meta.publisher.clone(),
@@ -1824,14 +1823,9 @@ fn print_json(book: &mut Book, path: &str) -> Result<(), String> {
             contributors: meta
                 .contributors
                 .iter()
-                .map(|c| ContributorInfo {
-                    name: c.name.clone(),
-                    role: c.role.clone(),
-                    file_as: c.file_as.clone(),
-                })
+                .map(ContributorInfo::from)
                 .collect(),
             title_sort: meta.title_sort.clone(),
-            author_sorts: meta.author_sorts.clone(),
             collection: meta.collection.as_ref().map(|c| CollectionInfoJson {
                 name: c.name.clone(),
                 collection_type: c.collection_type.clone(),
@@ -1882,12 +1876,29 @@ fn toc_to_info(entry: &TocEntry) -> TocInfo {
     }
 }
 
+/// One indented credit line: `name (role, role) [sort key]`, `fallback` standing
+/// in for the roles when none is stated.
+fn print_credit(c: &bokai::Contributor, fallback: &str) {
+    let roles = if c.roles.is_empty() {
+        fallback.to_string()
+    } else {
+        c.roles.join(", ")
+    };
+    match &c.file_as {
+        Some(file_as) => println!("  {} ({roles}) [{file_as}]", c.name),
+        None => println!("  {} ({roles})", c.name),
+    }
+}
+
 fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
     let meta = book.metadata();
     println!("File: {path}");
     println!("Title: {}", meta.title);
-    if !meta.authors.is_empty() {
-        println!("Authors: {}", meta.authors.join(", "));
+    if !meta.creators.is_empty() {
+        println!("Creators:");
+        for c in &meta.creators {
+            print_credit(c, "unstated");
+        }
     }
     if !meta.language.is_empty() {
         println!("Language: {}", meta.language);
@@ -1929,18 +1940,10 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
     if let Some(ref title_sort) = meta.title_sort {
         println!("Title Sort: {title_sort}");
     }
-    if !meta.author_sorts.is_empty() {
-        println!("Author Sort: {}", meta.author_sorts.join(" / "));
-    }
     if !meta.contributors.is_empty() {
         println!("Contributors:");
         for contrib in &meta.contributors {
-            let role = contrib.role.as_deref().unwrap_or("contributor");
-            if let Some(ref file_as) = contrib.file_as {
-                println!("  {} ({}) [{}]", contrib.name, role, file_as);
-            } else {
-                println!("  {} ({})", contrib.name, role);
-            }
+            print_credit(contrib, "contributor");
         }
     }
     if let Some(ref coll) = meta.collection {
@@ -2040,9 +2043,8 @@ fn parse_format(fmt: &str) -> Result<Format, String> {
     }
 }
 
-/// Post-conversion EPUB validation diagnostic over bytes the caller has
-/// written. `validate` runs the native validator and prints its findings; an
-/// error finding prints under `quiet` too. The pass prints and never fails.
+/// Post-conversion EPUB validation over written bytes: `validate` runs the native
+/// validator and prints its findings, an error finding under `quiet` too, never failing.
 #[cfg(feature = "validate")]
 fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
     if !validate {
@@ -2107,9 +2109,8 @@ fn write_export(
     Ok(())
 }
 
-/// Report the error-level findings a book-mutating edit introduced: a wild
-/// book stays wild, and an edit adds no defect. Non-blocking, over a file the
-/// caller has written.
+/// Report the error-level findings a book-mutating edit introduced beyond the source's
+/// own, over a written file, without blocking.
 #[cfg(feature = "validate")]
 fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
     let added = bokai::validate::source::added_errors(before, after);
@@ -2292,8 +2293,7 @@ fn convert(
         return Ok(());
     }
 
-    // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX. The
-    // device renders each embedded page.
+    // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX.
     #[cfg(feature = "pdf")]
     if !from_stdin
         && output_format == Format::Kfx
@@ -2714,8 +2714,7 @@ fn convert_pdf_to_kfx(
     let bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
     let doc = bokai::import::probe_pdf(bytes).map_err(|e| format!("PDF parse failed: {e}"))?;
 
-    // Title: PDF /Info (title-cased if ALL CAPS, as Amazon does), else file
-    // stem. Author: PDF /Info, if present.
+    // Title: PDF /Info, title-cased if ALL CAPS, else the file stem. Author: PDF /Info.
     let title = doc
         .title
         .clone()
@@ -2814,8 +2813,7 @@ fn convert_kfx_to_pdf(input: &str, output: &str, quiet: bool) -> Result<(), Stri
     Ok(())
 }
 
-/// Title-case a string only if it is "shouting" (has letters and no lowercase),
-/// matching what Amazon does to an ALL-CAPS `/Info` title.
+/// Title-case a string only if it is "shouting": letters and no lowercase.
 #[cfg(feature = "pdf")]
 fn title_case_if_shouting(s: &str) -> String {
     let has_lower = s.chars().any(|c| c.is_lowercase());

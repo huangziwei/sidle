@@ -328,6 +328,8 @@ fn convert_kfx_to_epub(
     on_progress("load", 0, 1, "Reading KFX");
     let mut handle = bokai::Book::open_format(source_path, bokai::Format::Kfx)
         .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load {}): {e}", source_path.display()))?;
+    // The row's credits restate the creators: a KFX states no roles.
+    handle.set_metadata_override(descriptive_override(handle.metadata(), book));
     let mut writer = File::create(&tmp_path)
         .map_err(|e| anyhow::anyhow!("create {}: {e}", tmp_path.display()))?;
     let exported = handle.export_with_progress(bokai::Format::Epub, &mut writer, on_progress);
@@ -382,7 +384,10 @@ fn convert_pdf_to_kfx(
     let doc = bokai::import::probe_pdf(bytes).map_err(|e| anyhow::anyhow!("probe pdf: {e}"))?;
     let meta = bokai::export::PdfKfxMeta {
         title: book.title.clone(),
-        author: (!book.author.trim().is_empty()).then(|| book.author.clone()),
+        author: Some(crate::library::credits::join_display(
+            &crate::library::credits::names(&book.credits),
+        ))
+        .filter(|a| !a.is_empty()),
         language: if book.language.is_empty() {
             "en".to_string()
         } else {
@@ -548,15 +553,48 @@ fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF]
 }
 
-/// The [`bokai::Metadata`] a KFX export writes: a clone of `source` with the
-/// fields `book` tracks overlaid onto it.
-pub fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai::Metadata {
+/// `source`'s creators restated as `book` credits them: each credit's name and
+/// roles, a credit stating none taking those of the creator in its place, and
+/// that creator's sort key kept when it holds for the credited name.
+pub fn credited_creators(source: &[bokai::Contributor], book: &BookRow) -> Vec<bokai::Contributor> {
+    book.credits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let same = source
+                .get(i)
+                .filter(|s| bokai::model::sort_key_survives(&s.name, &c.name));
+            bokai::Contributor {
+                name: c.name.clone(),
+                file_as: same.and_then(|s| s.file_as.clone()),
+                roles: if c.roles.is_empty() {
+                    same.map(|s| s.roles.clone()).unwrap_or_default()
+                } else {
+                    c.roles.clone()
+                },
+            }
+        })
+        .collect()
+}
+
+/// A clone of `source` stating the fields a bake writes into every file of
+/// `book`: title, credits, language, publisher and date.
+pub fn descriptive_override(source: &bokai::Metadata, book: &BookRow) -> bokai::Metadata {
     let mut m = source.clone();
     m.title = book.title.clone();
-    m.authors = crate::library::authors::split_display(&book.author);
+    m.creators = credited_creators(&source.creators, book);
     if !book.language.trim().is_empty() {
         m.language = book.language.clone();
     }
+    m.publisher = book.publisher.clone();
+    m.date = book.published_at.clone();
+    m
+}
+
+/// The [`bokai::Metadata`] a KFX export writes: [`descriptive_override`] with the
+/// reading layout and series `book` tracks overlaid too.
+pub fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai::Metadata {
+    let mut m = descriptive_override(source, book);
     // `None` leaves the source's own `page_progression_direction`.
     if let Some(ppd) = &book.ppd {
         m.page_progression_direction = Some(ppd.clone());
@@ -566,8 +604,6 @@ pub fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai
     if let Some(wm) = &book.writing_mode {
         m.primary_writing_mode = Some(wm.clone());
     }
-    m.publisher = book.publisher.clone();
-    m.date = book.published_at.clone();
     m.collection = book
         .series_name
         .clone()
@@ -587,7 +623,7 @@ fn derived_basename(book: &BookRow, source: &Path) -> String {
     {
         return stem.to_string();
     }
-    let authors = crate::library::authors::split_display(&book.author);
+    let authors = crate::library::credits::author_names(&book.credits);
     format_basename(&authors, &book.title, None)
 }
 
@@ -601,6 +637,7 @@ mod tests {
             sha256: "sha".into(),
             title: title.into(),
             author: author.into(),
+            credits: crate::library::credits::from_author_line(author),
             title_romaji: String::new(),
             author_romaji: String::new(),
             search_key: String::new(),
@@ -635,7 +672,7 @@ mod tests {
     fn override_applies_db_fields_but_preserves_untracked() {
         let mut src = bokai::Metadata {
             title: "Old Title".into(),
-            authors: vec!["Old Author".into()],
+            creators: vec![bokai::Contributor::named("Old Author")],
             language: "ja".into(),
             ..Default::default()
         };
@@ -653,10 +690,7 @@ mod tests {
         let m = book_metadata_override(&src, &r);
 
         assert_eq!(m.title, "New Title");
-        assert_eq!(
-            m.authors,
-            vec!["Ann Author".to_string(), "Bob Writer".to_string()]
-        );
+        assert_eq!(m.creator_names(), ["Ann Author", "Bob Writer"]);
         assert_eq!(m.language, "en");
         assert_eq!(m.publisher.as_deref(), Some("New Press"));
         assert_eq!(m.date.as_deref(), Some("2021"));
@@ -676,6 +710,38 @@ mod tests {
         let mut r = row("T", "A");
         r.language = String::new();
         assert_eq!(book_metadata_override(&src, &r).language, "ja");
+    }
+
+    #[test]
+    fn the_credits_restate_the_creators_keeping_what_still_holds() {
+        let keyed = |name: &str, key: &str| bokai::Contributor {
+            file_as: Some(key.into()),
+            ..bokai::Contributor::named(name).with_role("aut")
+        };
+        let src = vec![
+            keyed("Doe, Jane", "Doe, Jane"),
+            keyed("Ivy Drawer", "Drawer, Ivy"),
+            keyed("Gone Person", "Person, Gone"),
+        ];
+        let mut r = row("T", "");
+        r.credits = vec![
+            crate::library::credits::Credit::named("Jane Doe"),
+            crate::library::credits::Credit::with_roles("Ivy Drawer", &["ill"]),
+            crate::library::credits::Credit::named("New Person"),
+        ];
+        let got = credited_creators(&src, &r);
+        assert_eq!(
+            got,
+            [
+                keyed("Jane Doe", "Doe, Jane"),
+                bokai::Contributor {
+                    file_as: Some("Drawer, Ivy".into()),
+                    ..bokai::Contributor::named("Ivy Drawer").with_role("ill")
+                },
+                bokai::Contributor::named("New Person"),
+            ],
+            "a reordered name keeps its key and unstated roles, a stated role wins, a new person starts bare"
+        );
     }
 
     #[test]

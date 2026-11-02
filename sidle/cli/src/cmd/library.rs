@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::Connection;
 use serde::Serialize;
+use sidle_core::library::credits::{self, Credit};
 use sidle_core::library::db::{self, BookRow, BulkMetadataPatch};
 use sidle_core::library::import::{self, ImportOutcome};
 use sidle_core::library::{cover_fetch, export as exporter, metadata, omnibus, progress};
@@ -344,9 +345,13 @@ pub struct SetArgs {
     #[arg(long)]
     title: Option<String>,
     /// Author(s). Split on `&` or `、`; Western names are flipped to natural
-    /// order and re-joined.
+    /// order and re-joined. Replaces the authors; other credits stay.
     #[arg(long)]
     author: Option<String>,
+    /// Give a person a role, crediting them where they are not: `ROLE:NAME` with
+    /// a MARC relator code, e.g. `edt:Ann Writer` or `ill:Ivy Drawer`. Repeatable.
+    #[arg(long = "credit", value_name = "ROLE:NAME")]
+    credits: Vec<String>,
     /// Language code, harmonized: `en-US` → `en`, `zh-TW` → `zh-Hant`.
     #[arg(long)]
     language: Option<String>,
@@ -393,6 +398,17 @@ pub fn set(ctx: &Ctx, args: SetArgs) -> Result<()> {
             books.len()
         );
     }
+    let assigned = credits::normalize(
+        args.credits
+            .iter()
+            .map(|a| match a.split_once(':') {
+                Some((role, name)) if !role.trim().is_empty() && !name.trim().is_empty() => {
+                    Ok(Credit::with_roles(name, &[role]))
+                }
+                _ => Err(anyhow::anyhow!("--credit takes ROLE:NAME, got {a:?}")),
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
     if args.dry_run {
         return ctx.report(&books, || {
             println!("{} book(s) would be edited:", books.len());
@@ -411,6 +427,13 @@ pub fn set(ctx: &Ctx, args: SetArgs) -> Result<()> {
             let mut patch = metadata::patch_from(&books[0]);
             patch.title = title;
             apply_scalars(&mut patch, &args);
+            if !assigned.is_empty() {
+                let base = match &args.author {
+                    Some(a) => credits::with_authors(&books[0].credits, &credits::parse_input(a)),
+                    None => books[0].credits.clone(),
+                };
+                patch.credits = Some(credits::assign(&base, &assigned));
+            }
             for t in &args.add_tags {
                 patch.tags.push(t.clone());
             }
@@ -421,6 +444,7 @@ pub fn set(ctx: &Ctx, args: SetArgs) -> Result<()> {
         } else {
             let patch = BulkMetadataPatch {
                 author: args.author.clone(),
+                credits: assigned,
                 language: args.language.clone(),
                 ppd: args.ppd.clone(),
                 writing_mode: args.writing_mode.clone(),
@@ -709,6 +733,92 @@ pub fn bake(ctx: &Ctx, select: &Select, apply: bool) -> Result<()> {
                 books.len()
             );
         }
+    })
+}
+
+/// One credit as the `credits` report prints it: `name (role, role)`.
+fn credit_text(c: &Credit) -> String {
+    match c.roles.as_slice() {
+        [] => c.name.clone(),
+        roles => format!("{} ({})", c.name, roles.join(", ")),
+    }
+}
+
+/// Store the credits each selected book's EPUB states where they name the row's
+/// people and say more; see [`metadata::credits_from_epub`].
+pub fn credits(ctx: &Ctx, select: &Select, apply: bool) -> Result<()> {
+    let books = {
+        let conn = ctx.conn();
+        select.resolve_nonempty(&conn)?
+    };
+
+    #[derive(Serialize)]
+    struct Read {
+        book_id: i64,
+        title: String,
+        row: Vec<Credit>,
+        file: Vec<Credit>,
+        author_before: String,
+        author_after: String,
+    }
+    let mut out = Vec::new();
+    let mut failed = 0;
+    for book in &books {
+        let file = match metadata::credits_from_epub(book) {
+            Ok(Some(file)) => file,
+            Ok(None) => continue,
+            Err(e) => {
+                failed += 1;
+                ctx.say(format!("[{}] {}: unreadable: {e:#}", book.id, book.title));
+                continue;
+            }
+        };
+        let author_after = credits::author_line(&file);
+        ctx.say(format!("[{}] {}", book.id, book.title));
+        ctx.say(format!(
+            "  row:  {}",
+            book.credits
+                .iter()
+                .map(credit_text)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+        ctx.say(format!(
+            "  file: {}",
+            file.iter().map(credit_text).collect::<Vec<_>>().join("; ")
+        ));
+        if author_after != book.author {
+            ctx.say(format!("  author: {:?} -> {author_after:?}", book.author));
+        }
+        out.push(Read {
+            book_id: book.id,
+            title: book.title.clone(),
+            row: book.credits.clone(),
+            file,
+            author_before: book.author.clone(),
+            author_after,
+        });
+    }
+
+    if apply {
+        let conn = ctx.conn();
+        for r in &out {
+            metadata::adopt_credits(&conn, &ctx.paths, r.book_id, &r.file)
+                .with_context(|| format!("store credits of book {}", r.book_id))?;
+        }
+    }
+    let moved = out
+        .iter()
+        .filter(|r| r.author_before != r.author_after)
+        .count();
+    ctx.report(&out, || {
+        let verb = if apply { "stored" } else { "to store" };
+        println!(
+            "\n{} of {} book(s) {verb} from their EPUB, {moved} with a new author line ({failed} unreadable).{}",
+            out.len(),
+            books.len(),
+            if apply { "" } else { " Re-run with --apply." }
+        );
     })
 }
 

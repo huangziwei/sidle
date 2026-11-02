@@ -307,7 +307,7 @@ mod tests {
             &NewBook {
                 sha256: sha,
                 title: "Linear Models with R",
-                author: "",
+                credits: &[],
                 language: "",
                 ppd: None,
                 epub_path: None,

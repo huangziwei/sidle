@@ -36,23 +36,21 @@ use super::Exporter;
 pub struct EpubConfig {
     /// Compression level for deflate (0-9, default 6).
     pub compression_level: Option<u32>,
-    /// If true, normalize content through IR pipeline for clean, consistent output.
-    /// Default is false (passthrough mode preserves original HTML/CSS).
+    /// Normalize content through the IR pipeline; `false` passes the source HTML/CSS through.
     pub normalize: bool,
 }
 
 /// Whether a build produces asset bytes or only describes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Assets {
-    /// Load and transcode every asset. A container has to hold the bytes.
+    /// Load and transcode every asset: the bytes a container holds.
     Load,
-    /// Describe them only — path, media type, declared pixel size. A renderer
+    /// Describe them only: path, media type, declared pixel size.
     Describe,
 }
 
-/// How to build a package. Prefer the two named intents,
-/// [`Self::container`] and [`Self::rendered`], over assembling one by hand:
-/// the combinations that matter are the two that have a consumer.
+/// How to build a package; [`Self::container`] and [`Self::rendered`] name the two that
+/// have a consumer.
 #[derive(Debug, Clone, Copy)]
 pub struct PackageOptions {
     /// Whether documents carry their source element ids.
@@ -87,22 +85,18 @@ impl PackageOptions {
 pub struct PackageAsset {
     /// Path within `OEBPS/`.
     pub href: String,
-    /// Media type, sniffed from loaded bytes (a JPEG-XR that failed to
-    /// decode passes through as `image/jxr`), else the source's declaration.
+    /// Media type sniffed from loaded bytes (an undecodable JPEG-XR stays `image/jxr`), else declared.
     pub media_type: String,
-    /// Pixel size: read out of the bytes on a build that loaded them, taken
-    /// from the source's declaration on one that did not.
+    /// Pixel size, read from loaded bytes, else taken from the source's declaration.
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// `None` on a build that only described the assets — see [`Assets`] — and
-    /// on one whose bytes left through an [`AssetSink`].
+    /// `None` on a describe-only build, or one whose bytes left through an [`AssetSink`].
     pub bytes: Option<Vec<u8>>,
 }
 
 /// Where a build sends each asset's bytes.
 pub trait AssetSink {
-    /// Take one asset's post-transcode bytes. `asset` describes them and is
-    /// the entry that reaches the package and the manifest.
+    /// Take one asset's post-transcode bytes, `asset` the entry the package and manifest carry.
     fn take(&mut self, asset: &PackageAsset, bytes: Vec<u8>) -> io::Result<()>;
 }
 
@@ -125,25 +119,21 @@ pub struct PackageDocument {
     pub href: String,
     /// The complete XHTML document.
     pub xhtml: String,
-    /// Spine `properties` — the fixed-layout page-spread pairing, when the
-    /// importer declared one.
+    /// Spine `properties`: the fixed-layout page-spread pairing the importer declared.
     pub spread: Option<String>,
     /// Fixed-layout page pixel box, when the source declared one.
     pub viewport: Option<(u32, u32)>,
 }
 
-/// A normalized book built into EPUB shape but not yet written to a container:
-/// every document, stylesheet, and asset byte the zip would hold, in the order
-/// it would hold them.
+/// A normalized book built into EPUB shape, unwritten: every document, stylesheet and
+/// asset byte a container holds, in its order.
 #[derive(Debug)]
 pub struct EpubPackage {
     /// Every spine document the source produced, in reading order.
     pub documents: Vec<PackageDocument>,
-    /// The synthesized SVG cover page, which occupies spine position 0 when
-    /// present. Written last in the container (manifest registration order).
+    /// The synthesized SVG cover page at spine position 0, written last (manifest order).
     pub titlepage: Option<String>,
-    /// Index into [`Self::documents`] of the source's own cover page, when a
-    /// [`Self::titlepage`] renders the same image.
+    /// Index into [`Self::documents`] of the source's cover page a [`Self::titlepage`] repeats.
     pub redundant_cover: Option<usize>,
     /// `content.opf`.
     pub opf: String,
@@ -155,18 +145,13 @@ pub struct EpubPackage {
     pub css: String,
     /// Assets in manifest registration order, post-transcode.
     pub assets: Vec<PackageAsset>,
-    /// The resolved TOC tree, hrefs pointing into [`Self::documents`], in the
-    /// order the source declares its navigation — which is not necessarily
-    /// spine order, and is not the order [`Self::nav`] emits.
+    /// The resolved TOC tree over [`Self::documents`], in the source's navigation order.
     pub toc: Vec<NavPoint>,
-    /// The document's CSS writing mode (`horizontal-tb`, `vertical-rl`,
-    /// `vertical-lr`) — the value [`Self::css`] writes into its body rule.
+    /// The CSS writing mode [`Self::css`] writes into its body rule.
     pub writing_mode: String,
 }
 
 /// EPUB format exporter.
-///
-/// Creates standard EPUB files compatible with most e-readers.
 pub struct EpubExporter {
     config: EpubConfig,
 }
@@ -207,8 +192,7 @@ impl EpubExporter {
         writer: &mut W,
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
-        // Use normalized mode if explicitly requested OR if the source format requires it
-        // (e.g., KFX raw content is binary Ion, not HTML)
+        // Normalized when configured, or when the source needs it (KFX content is Ion).
         if self.config.normalize || book.requires_normalized_export() {
             self.export_normalized(book, writer, on_progress)
         } else {
@@ -223,8 +207,7 @@ impl EpubExporter {
         writer: &mut W,
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
-        // AZW3/MOBI backends refine NCX byte positions into `#id` anchors;
-        // a no-op elsewhere. The raw route reaches it only here.
+        // AZW3/MOBI backends turn NCX byte positions into `#id` anchors, a no-op elsewhere.
         book.resolve_toc();
 
         let mut zip = ZipWriter::new(writer);
@@ -289,16 +272,15 @@ impl EpubExporter {
             });
         }
 
-        // 4. Build titlepage. Apple Books / Kindle only render a cover *page*
+        // 4. Build the titlepage.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
         if let Some(cid) = &cover_id
             && let Some(item) = manifest_items.iter_mut().find(|i| &i.id == cid)
         {
             item.properties.push("cover-image".to_string());
         }
-        // A calibre-lineage EPUB's `titlepage.xhtml` is the same SVG wrapper
-        // `build_titlepage` emits. `is_cover_only_document` finds it, and
-        // synthesis is skipped.
+        // `is_cover_only_document` finds a source page of the SVG-wrapper shape
+        // `build_titlepage` emits, and synthesis is skipped.
         let source_cover_page: Option<String> = book
             .metadata()
             .cover_image
@@ -365,8 +347,7 @@ impl EpubExporter {
             );
         }
 
-        // 5. Write content.opf. The guide keeps its single cover reference
-        // (readers use it to open on the cover page).
+        // 5. Write content.opf, its guide keeping the one cover reference.
         let mut guide: Vec<OpfGuideRef> = Vec::new();
         if let Some(href) = &cover_page_href {
             opf::repoint_cover_guide(&mut guide, href);
@@ -381,7 +362,7 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 6a. Write nav.xhtml (EPUB 3 navigation document). Passthrough TOC
+        // 6a. Write nav.xhtml (EPUB 3 navigation document).
         let toc_points = toc_to_navpoints(book.toc(), &|href| Some(href.to_string()));
         let nav_landmarks: Vec<OpfGuideRef> = book
             .landmarks()
@@ -602,9 +583,8 @@ fn finish_container<W: Write + Seek>(
     }
 
     for (i, doc) in package.documents.iter().enumerate() {
-        // ONE cover in the shipped container: the titlepage below is the
-        // page that fills a foreign reader's viewport, so the source's own
-        // cover page goes (see `EpubPackage::redundant_cover`).
+        // One cover in the shipped container: the titlepage below stays, the source's own
+        // cover page goes (`EpubPackage::redundant_cover`).
         if Some(i) == package.redundant_cover {
             continue;
         }
@@ -657,7 +637,7 @@ pub fn build_package_into(
     sink: &mut dyn AssetSink,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<EpubPackage> {
-    /// Assets described from the importer's declared manifest, in the given
+    /// Assets described from the importer's declared manifest, in `paths` order.
     fn return_described(
         paths: Vec<std::path::PathBuf>,
         declared: &HashMap<String, crate::import::AssetInfo>,
@@ -728,9 +708,8 @@ pub fn build_package_into(
         let content = normalize_book_with(book, source_elements)?;
         let spine: Vec<_> = book.spine().to_vec();
 
-        // Output filename per chapter, from the chapter's source id (for
-        // KFX: the section name). The `{section}.xhtml` shape and the `-N`
-        // collision suffix are calibre's.
+        // Output filename per chapter, from its source id (a KFX section name), `-N` on a
+        // collision.
         let mut chapter_files =
             chapter_filenames(content.chapters.iter().map(|c| c.source_path.as_str()));
 
@@ -747,14 +726,14 @@ pub fn build_package_into(
         } else {
             None
         };
-        // Each document keeps its own name; `chapter_files` is the *navigation*
+        // Each document keeps its own name; `chapter_files` is the navigation's, the cover remapped.
         let document_files = chapter_files.clone();
         if let Some(idx) = cover_section_idx {
             chapter_files[idx] = "cover.xhtml".to_string();
         }
 
-        // Build manifest in calibre's registration order — images, stylesheet, chapters,
-        // titlepage — with ids from filenames. Manifest ids depend on this order.
+        // Build the manifest in registration order (images, stylesheet, chapters, titlepage),
+        // ids from filenames.
         let mut taken_ids: HashSet<String> = HashSet::new();
         let next_id = |taken: &mut HashSet<String>, name: &str| -> String {
             let id = opf::make_manifest_id(name, |candidate| taken.contains(candidate));
@@ -764,7 +743,7 @@ pub fn build_package_into(
         let mut manifest_items: Vec<OpfItem> = Vec::new();
         let mut spine_items: Vec<OpfItemref> = Vec::new();
 
-        // Assets first. When the importer declares an authoritative bundle
+        // Assets first: the importer's authoritative bundle when it declares one.
         let asset_bytes: Vec<PackageAsset> = if let Some(asset_list) = book.bundled_assets() {
             // Fixed-layout books bundle page thumbnails the reading order never references;
             // ship only the images the pages use, pruned before the bulk load.
@@ -773,7 +752,7 @@ pub fn build_package_into(
                 asset_list
                     .into_iter()
                     .filter(|p| {
-                        // Bind `&str` explicitly: `name.as_ref()` alone is
+                        // `&str` bound explicitly for the `contains` lookup.
                         let name: &str = &p.to_string_lossy();
                         content.assets.contains(name) || Some(name) == cover.as_deref()
                     })
@@ -781,15 +760,13 @@ pub fn build_package_into(
             } else {
                 asset_list
             };
-            // Chunked transcode, ~2 items per worker, each chunk across
+            // Chunked transcode, ~2 items per worker.
             let total = asset_list.len();
             if total > 0 {
                 on_progress("resources", 0, total, "Decoding images");
             }
             if opts.assets == Assets::Describe {
-                // Describe without reading: the declared manifest carries the
-                // media type and pixel size, so this costs nothing even for a
-                // book whose images would take seconds to decode.
+                // Describe without reading: the declared manifest carries each media type and pixel size.
                 let declared: HashMap<String, crate::import::AssetInfo> = book
                     .asset_manifest()
                     .unwrap_or_default()
@@ -895,8 +872,7 @@ pub fn build_package_into(
             });
         }
 
-        // 4. Build the titlepage from the cover: Apple Books needs a spine-positioned
-        // cover document to render the cover in the reading flow.
+        // 4. Build the titlepage from the cover, a spine-positioned cover document.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
         if let Some(cid) = &cover_id
             && let Some(item) = manifest_items.iter_mut().find(|i| &i.id == cid)
@@ -909,7 +885,7 @@ pub fn build_package_into(
             None
         } else if let Some(ref cid) = cover_id {
             manifest_items.iter().find(|i| &i.id == cid).map(|item| {
-                // Dims are optional — the shared builder falls back to a bare
+                // Dims are optional for the shared builder.
                 let dims = asset_bytes
                     .iter()
                     .find(|a| sanitize_path(&a.href) == item.href)
@@ -953,7 +929,7 @@ pub fn build_package_into(
         }
         let chapter_pos: HashMap<crate::import::ChapterId, usize> =
             spine.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
-        // Fragment rules (in `resolve_nav_href`) match calibre:
+        // Fragment rules live in `resolve_nav_href`.
         let mut toc_points = toc_to_navpoints(book.toc(), &|href| {
             resolve_nav_href(
                 book,
@@ -964,9 +940,8 @@ pub fn build_package_into(
                 cover_section_idx,
             )
         });
-        // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
-        // calibre sorts, so sort identically. Kept for the *container* only —
-        // the package hands a renderer the book's own order (see `package_toc`).
+        // EPUB 3 wants the toc nav in reading order (epubcheck NAV-011): sorted for the
+        // container, while `package_toc` keeps the book's own order.
         let authored_toc = toc_points.clone();
         let file_rank: HashMap<String, usize> = chapter_files
             .iter()
@@ -975,7 +950,7 @@ pub fn build_package_into(
             .collect();
         nav::sort_toc_reading_order(&mut toc_points, &file_rank);
 
-        // Page list: flat, kept in page order. The unlabelled book-start
+        // Page list: flat, in page order, without the unlabelled book-start entry.
         let page_points: Vec<NavPoint> = book
             .page_list()
             .iter()
@@ -1037,7 +1012,7 @@ pub fn build_package_into(
         // Packaging: OPF + nav/ncx. Image bytes are transcoded by this point —
         // serialization only, not the long pole.
         on_progress("finalize", 1, 1, "Packaging");
-        // A KFX source's metadata mirrors calibre's curated field set (see
+        // A KFX source's metadata takes the reduced field set of `build_opf_metadata`.
         let opf = opf::emit_opf(&OpfPackage {
             metadata: build_opf_metadata(
                 book.metadata(),
@@ -1050,9 +1025,8 @@ pub fn build_package_into(
             guide: guide.clone(),
         });
 
-        // nav.xhtml (EPUB 3 navigation document). The empty-TOC fallback
-        // points at the first spine document — the titlepage when one was
-        // synthesized, like calibre.
+        // nav.xhtml (EPUB 3 navigation document); an empty TOC falls back to the first spine
+        // document.
         let toc_fallback = if titlepage_xhtml.is_some() {
             Some("cover.xhtml")
         } else {
@@ -1089,7 +1063,7 @@ pub fn build_package_into(
             package_toc.insert(0, cover);
         }
 
-        // Every spine document the source produced, under its own name. The
+        // Every spine document the source produced, under its own name.
         let dropped_cover_href = cover_section_idx.map(|idx| document_files[idx].clone());
         let documents = content
             .chapters
@@ -1173,7 +1147,7 @@ fn find_cover_manifest_id(
         .map(|item| item.id.clone())
 }
 
-/// True when `html` is an image-only document whose sole image renders
+/// True when `html` is an image-only document whose sole image is `cover_href`.
 pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
     // A full-bleed image page (the shape predicate is shared with TOC repair,
     // which uses it to find volume starts) whose image is *the* cover.
@@ -1183,7 +1157,7 @@ pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
     }
 }
 
-/// Normalize a passthrough content document to EPUB 3 conformance without
+/// Normalize a passthrough content document to EPUB 3 conformance.
 fn normalize_passthrough_xhtml(
     content: &[u8],
     fallback_title: &str,
@@ -1354,7 +1328,7 @@ fn fill_empty_title(s: &str, fallback: &str) -> Option<String> {
         let cs = gt + 1;
         let ce = cs + s[cs..].find("</title>")?;
         if !s[cs..ce].trim().is_empty() {
-            return None; // already non-empty
+            return None; // non-empty
         }
         ce + "</title>".len()
     };
@@ -1367,25 +1341,28 @@ fn fill_empty_title(s: &str, fallback: &str) -> Option<String> {
     Some(out)
 }
 
-/// Build the OPF `<metadata>` block from the book's metadata.
-///
-/// With `normalized` set (KFX sources), the field set follows calibre's:
+/// Build the OPF `<metadata>` block from the book's metadata; `normalized` (a KFX
+/// source) drops contributors, description, subjects, rights and series.
 fn build_opf_metadata(
     md: &crate::model::Metadata,
     normalized: bool,
     cover_manifest_id: Option<String>,
     derived_resolution: Option<(u32, u32)>,
 ) -> OpfMetadata {
-    // Positional per-creator sort keys (shared with calibre via
-    // `creator_file_as_keys`).
-    let file_as_keys = opf::creator_file_as_keys(&md.authors, &md.author_sorts);
+    // Positional per-creator sort keys.
+    let file_as_keys = opf::creator_file_as_keys(md);
+    // A creator stating no role is written as the author it is read as.
     let creators = md
-        .authors
+        .creators
         .iter()
         .zip(&file_as_keys)
-        .map(|(author, file_as)| OpfCreator {
-            name: author.clone(),
-            role: Some("aut".to_string()),
+        .map(|(c, file_as)| OpfCreator {
+            name: c.name.clone(),
+            roles: if c.roles.is_empty() {
+                vec!["aut".to_string()]
+            } else {
+                c.roles.clone()
+            },
             file_as: Some(file_as.clone()),
         })
         .collect();
@@ -1398,7 +1375,7 @@ fn build_opf_metadata(
                 .iter()
                 .map(|c| OpfCreator {
                     name: c.name.clone(),
-                    role: c.role.clone(),
+                    roles: c.roles.clone(),
                     file_as: c.file_as.clone(),
                 })
                 .collect(),
@@ -1419,7 +1396,7 @@ fn build_opf_metadata(
         md.date.clone()
     };
 
-    // Fixed-layout: a declared doc-level viewport doubles as the EBPAJ
+    // Fixed-layout: a declared doc-level viewport doubles as the EBPAJ viewport.
     let fixed_layout = md.fixed_layout.then(|| OpfFixedLayout {
         rendition_spread: md.rendition_spread.clone(),
         ebpaj_viewport: md.default_viewport,
@@ -1510,8 +1487,7 @@ fn toc_reaches(toc: &[NavPoint], document: &str) -> bool {
         .any(|p| p.href.split('#').next() == Some(document) || toc_reaches(&p.children, document))
 }
 
-// `cover.xhtml` comes from the shared calibre-shaped builder
-// (`export::titlepage`), the same one calibre ships.
+// `cover.xhtml` comes from the shared builder, `export::titlepage`.
 use self::titlepage::build_titlepage;
 
 /// Sanitize a path for use in ZIP (remove leading slashes, normalize).
@@ -1570,9 +1546,8 @@ pub(crate) fn resolve_nav_href(
     };
     let pos = *chapter_pos.get(&target.chapter)?;
     let file = chapter_files.get(pos).cloned()?;
-    // A target inside the dropped cover section keeps its file (remapped to the
-    // synthesized cover page) but loses its fragment: that page is a bare SVG
-    // wrapper carrying no ids, so any `#…` on it dangles (epubcheck RSC-012).
+    // A target inside the dropped cover section keeps its file, remapped to the synthesized
+    // cover page, and loses its fragment: that SVG wrapper carries no ids (epubcheck RSC-012).
     if Some(pos) == dropped_idx {
         return Some(file);
     }
@@ -1815,7 +1790,7 @@ mod tests {
 
     #[test]
     fn cover_only_document_matches_both_page_shapes() {
-        // The bare-`<img>` shape (a KFX cover section) and the SVG-wrapper
+        // The bare-`<img>` shape (a KFX cover section) and the SVG wrapper.
         let raster = r#"<html><body><div><img src="cover.jpeg" alt=""/></div></body></html>"#;
         let vector = r#"<html><body><div><svg viewBox="0 0 60 90">
             <image width="60" height="90" xlink:href="images/cover.jpeg"/>
@@ -1855,7 +1830,7 @@ mod tests {
     #[test]
     fn kfx_export_with_progress_emits_phases_in_order() {
         use std::cell::RefCell;
-        // KFX → EPUB (the normalized path). The IR route transcodes images
+        // KFX → EPUB (the normalized path).
         let mut book = crate::Book::open("tests/fixtures/[太宰 治] 人間失格.kfx").unwrap();
         let phases = RefCell::new(Vec::<String>::new());
         let mut sink = Vec::new();

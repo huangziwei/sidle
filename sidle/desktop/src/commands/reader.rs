@@ -287,7 +287,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         if pdf_path.is_some() || bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
             let rd = bokai::formats::kfx::pdf_pages::read_pages(&kfx)
                 .map_err(|e| format!("read PDF KFX for reader: {e}"))?;
-            let authors = crate::library::authors::split_display(&author);
+            let authors = crate::library::credits::split_display(&author);
             let dto = ReaderPdfDto {
                 page_count: rd.pages.len(),
                 title,
@@ -327,7 +327,9 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         // text books windowed.
         let (book, images) = sidle_core::reader::ReaderBook::open(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
-        let built = build_reader_open(book, resume_eid);
+        let mut built = build_reader_open(book, resume_eid);
+        // `authors` takes the library's author line.
+        built.dto.authors = crate::library::credits::split_display(&author);
         // Cache the store only when something is left to serve: images the
         // manifest promises, or sections the window withheld.
         let has_images = !built.dto.images.is_empty();

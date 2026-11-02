@@ -186,8 +186,8 @@ impl Kf8Builder {
         }
         self.link_counter = link_counter;
 
-        // `self.css_flows` was collected from `css_hrefs` in the same sorted order, so
-        // zipping pairs each flow with its own href, which `@import` refs resolve against.
+        // `self.css_flows` and `css_hrefs` share one sorted order: zipped, each flow meets the
+        // href its `@import` refs resolve against.
         let rewritten_css: Vec<Vec<u8>> = self
             .css_flows
             .iter()
@@ -217,9 +217,7 @@ impl Kf8Builder {
         }
         self.flows_length = all_flows.len();
 
-        // Split into records and PalmDoc-compress. Records are compressed
-        // independently, so this fans out across chunks (the compression is
-        // the bulk of AZW3 export time on large books).
+        // Split into records and PalmDoc-compress them, each record independently and in parallel.
         fn compress_record(chunk: &[u8]) -> Vec<u8> {
             let mut record = crate::formats::mobi::palmdoc::compress(chunk);
             record.push(0); // multibyte indicator (0 = no UTF-8 overlap)
@@ -232,7 +230,7 @@ impl Kf8Builder {
             .extend(all_flows.chunks(RECORD_SIZE).map(compress_record));
 
         self.last_text_record = (self.records.len() - 1) as u16;
-        // Insert a zero-padding record after text so the next (non-text)
+        // A zero-padding record after the text 4-byte aligns the next record.
         let total_text_bytes: usize = self.records[1..=self.last_text_record as usize]
             .iter()
             .map(|r| r.len())
@@ -342,8 +340,7 @@ impl Kf8Builder {
             self.first_resource_record = self.records.len() as u32;
         }
 
-        // The last reader of `ctx.resources`, so each image's bytes are moved out rather
-        // than cloned.
+        // The last reader of `ctx.resources`: each image's bytes move out uncloned.
         for i in 0..self.image_hrefs.len() {
             if let Some(resource) = self.ctx.resources.get_mut(&self.image_hrefs[i]) {
                 self.records.push(std::mem::take(&mut resource.data));
@@ -379,8 +376,7 @@ impl Kf8Builder {
                     .iter()
                     .map(|c| c.selector.clone())
                     .collect();
-                // `calculate_cncx_offsets` and `build_cncx` share the same
-                // record-rollover logic, so the offsets already encode
+                // `calculate_cncx_offsets` shares `build_cncx`'s record rollover: its offsets encode
                 // `record_number << 16 | offset_within_record`.
                 let cncx_offsets = calculate_cncx_offsets(&selectors);
                 let cncx_records = build_cncx(&selectors)?;
@@ -425,8 +421,7 @@ impl Kf8Builder {
             }
         }
 
-        // Build K8 guide index from landmarks. Kindle reads this to discover
-        // cover / start-of-content / endnotes / etc.
+        // Build the K8 guide index from the landmarks: cover, start of content, endnotes.
         if let Some(ref chunker_result) = self.chunker_result {
             let guide_entries = collect_guide_entries(
                 self.ctx.landmarks(),
@@ -482,8 +477,8 @@ impl Kf8Builder {
 
         let tbs_data = crate::formats::mobi::tbs::build_tbs_for_records(&tbs_entries, &lengths);
 
-        // Each record currently looks like `[compressed_text..., 0x00]` where
-        // the trailing `0x00` is the multibyte indicator (no UTF-8 overlap).
+        // Each record is `[compressed_text..., 0x00]`, the trailing `0x00` its multibyte
+        // indicator (no UTF-8 overlap).
         for (i, tbs) in tbs_data.into_iter().enumerate() {
             let rec_idx = i + 1;
             self.records[rec_idx].extend_from_slice(&tbs);
@@ -546,8 +541,7 @@ impl Kf8Builder {
 
         let mobi_header_len: u32 = 264;
         let title_offset = 16 + mobi_header_len + exth_len as u32;
-        // No `+ 2` separator between title and trailing padding — calibre
-        // writes `exth + full_title + zeroes(8192)` with nothing in between.
+        // `title_bytes` runs straight into the trailing padding, with no `+ 2` separator.
         let full_record_len = title_offset as usize + title_bytes.len();
 
         let mut record0 = Vec::with_capacity(full_record_len + 8192);
@@ -574,8 +568,7 @@ impl Kf8Builder {
             record0.extend_from_slice(&NULL_INDEX.to_be_bytes());
         }
 
-        // First non-text record — set by build_text_records, accounts for
-        // any 4-byte alignment padding record we inserted after the text.
+        // First non-text record, from `build_text_records`, past any alignment padding record.
         record0.extend_from_slice(&(self.first_non_text_record as u32).to_be_bytes());
 
         // Title offset and length
@@ -644,8 +637,8 @@ impl Kf8Builder {
         // Unknown
         record0.extend_from_slice(&[0xFF; 8]);
 
-        // Extra data flags: 0x01 (multibyte trailing byte) | 0x02 (TBS trailer).
-        // Must match what apply_trailing_byte_sequences actually appends.
+        // Extra data flags: 0x01 (multibyte trailing byte) | 0x02 (TBS trailer), as
+        // `apply_trailing_byte_sequences` appends them.
         let extra_data_flags: u32 = if self.ncx_entries.is_empty() { 1 } else { 3 };
         record0.extend_from_slice(&extra_data_flags.to_be_bytes());
 
@@ -668,7 +661,7 @@ impl Kf8Builder {
         // Title
         record0.extend_from_slice(title_bytes);
 
-        // Padding — calibre's MOBIHeader DSL ends with `padding = zeroes(8192)`
+        // Padding: 8192 zero bytes.
         let target_len = full_record_len + 8192;
         while record0.len() < target_len {
             record0.push(0);
@@ -681,15 +674,14 @@ impl Kf8Builder {
     pub(super) fn build_exth(&self) -> Vec<u8> {
         let mut records: Vec<(u32, Vec<u8>)> = Vec::new();
 
-        // Authors
-        for author in &self.ctx.metadata.authors {
-            records.push((100, author.as_bytes().to_vec()));
+        // Authors (100): every creator's name, as KF8 states no roles.
+        for author in self.ctx.metadata.creator_names() {
+            records.push((100, author.into_bytes()));
         }
 
-        // Author pronunciation (517) — one per author, positional with the EXTH 100
-        // authors above. Omitting them flattens the author sort keys on a round-trip.
-        for sort in &self.ctx.metadata.author_sorts {
-            records.push((517, sort.as_bytes().to_vec()));
+        // Author pronunciation (517): one per author, positional with the EXTH 100 records.
+        for sort in self.ctx.metadata.creator_sort_keys() {
+            records.push((517, sort.into_bytes()));
         }
 
         // Publisher
@@ -722,9 +714,8 @@ impl Kf8Builder {
             records.push((109, rights.as_bytes().to_vec()));
         }
 
-        // Source identifier (112). Kindle wants a `scheme:value` URN-ish string
-        // here (the scheme is opaque to it); emit our own `bokai:` scheme over
-        // the book's identifier, or a synthesized one when it has none.
+        // Source identifier (112): a `scheme:value` string, `bokai:` over the book's
+        // identifier or over its title.
         let source_id = if self.ctx.metadata.identifier.is_empty() {
             format!("bokai:{}", self.ctx.metadata.title)
         } else {
@@ -739,18 +730,14 @@ impl Kf8Builder {
         {
             cover_record_offset = Some(cover_idx as u32);
             records.push((201, (cover_idx as u32).to_be_bytes().to_vec()));
-            // hasfakecover = 0 (we have a real cover image)
+            // hasfakecover = 0: a real cover image.
             records.push((203, 0u32.to_be_bytes().to_vec()));
         }
 
-        // Thumbnail offset (202) — Kindle uses the same image for thumbs if
-        // no separate thumb is provided. Also emit the matching kindle:embed
-        // URI (129) so the home-screen thumbnail works.
+        // Thumbnail offset (202), the cover image, with its matching kindle:embed URI (129).
         if let Some(off) = cover_record_offset {
             records.push((202, off.to_be_bytes().to_vec()));
-            // EXTH 129 wants the resource record index as a base32 string
-            // The thumbnail URI in EXTH 129 must base32-encode the *same*
-            // value as EXTH 202 (thumbnail_offset). Calibre:
+            // EXTH 129 base32-encodes the same record index as EXTH 202 (`thumbnail_offset`).
             let mut buf = [0u8; 4];
             write_base32_4(off as usize, &mut buf);
             let uri = format!(
@@ -768,7 +755,7 @@ impl Kf8Builder {
             records.push((508, title_sort.as_bytes().to_vec()));
         }
 
-        // ASIN (113) — pass through a real Amazon ASIN, else a deterministic
+        // ASIN (113): a real ASIN passed through, else a deterministic one.
         let asin = crate::formats::kfx::metadata::resolve_export_asin(&self.ctx.metadata)
             .unwrap_or_else(|| "EBOK000000".to_string());
         records.push((113, asin.into_bytes()));
@@ -776,18 +763,13 @@ impl Kf8Builder {
         // Document type (501)
         records.push((501, b"EBOK".to_vec()));
 
-        // (EXTH 504 intentionally omitted — calibre does not emit it and
-        // it confused some Kindle firmware versions in our testing.)
-
-        // Language (524) — ISO 639-1 code. Kindle uses this to pick fonts and
-        // hyphenation, and won't render correctly without it for non-default
-        // languages. Strip any region suffix ("en-GB" → "en").
+        // Language (524): the ISO 639-1 code, region suffix stripped (`en-GB` → `en`).
         if !self.ctx.metadata.language.is_empty() {
             let primary = self.ctx.metadata.language.split('-').next().unwrap_or("en");
             records.push((524, primary.as_bytes().to_vec()));
         }
 
-        // Writing-mode hints (525 primary-writing-mode, 527 page-progression-
+        // Writing-mode hints: 525 primary-writing-mode, 527 page-progression-direction.
         if let Some(ref pwm) = self.ctx.metadata.primary_writing_mode {
             records.push((525, pwm.as_bytes().to_vec()));
         }
@@ -795,8 +777,7 @@ impl Kf8Builder {
             records.push((527, ppd.as_bytes().to_vec()));
         }
 
-        // KF8 housekeeping fields (calibre emits all of these on every book;
-        // omitting them is correlated with Kindle refusing to open the file).
+        // KF8 housekeeping fields.
         let num_resources = (self.image_hrefs.len() + self.font_hrefs.len()) as u32;
         records.push((125, num_resources.to_be_bytes().to_vec()));
         records.push((131, 0u32.to_be_bytes().to_vec()));
@@ -807,8 +788,7 @@ impl Kf8Builder {
         }
         records.push((535, b"0730-890adc2".to_vec()));
 
-        // Override Kindle fonts (528) — KF8 flag telling Kindle to honour
-        // embedded font @font-face rules.
+        // Override Kindle fonts (528): honour the embedded `@font-face` rules.
         records.push((528, b"true".to_vec()));
 
         // Build EXTH

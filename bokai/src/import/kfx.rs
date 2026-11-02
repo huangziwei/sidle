@@ -1,6 +1,4 @@
-//! KFX format importer.
-//!
-//! KFX is Amazon's Kindle Format 10, using Ion binary data format.
+//! KFX format importer: Kindle Format 10, an Ion binary container.
 
 use std::collections::HashMap;
 use std::io;
@@ -67,9 +65,7 @@ pub struct KfxImporter {
     /// Table of contents.
     toc: Vec<TocEntry>,
 
-    /// Physical page list (from the `page_list` nav_container). Flat; empty
-    /// when the KFX carries no page numbers. A KFX→KFX reconvert and the
-    /// IR-based export both re-emit it.
+    /// Physical page list from the `page_list` nav_container; flat, empty without page numbers.
     page_list: Vec<TocEntry>,
 
     /// Landmarks (structural navigation points).
@@ -86,33 +82,21 @@ pub struct KfxImporter {
     /// Whether section→storyline mapping has been built
     section_storylines_indexed: bool,
 
-    /// Element ids declared on section entities → owning section name. Chapter
-    /// content holds none of them, and a navigation target naming one falls
-    /// back to the section's chapter start.
+    /// Element ids section entities declare → owning section, for nav targets no chapter holds.
     section_eids: HashMap<i64, String>,
 
-    /// Section name → the last page template's element id and `$style` name.
-    /// The template is the chapter's root container, and an anchor at
-    /// `(template_eid, offset)` stamps onto it.
+    /// Section name → its last page template's element id and `$style`: the chapter's root.
     section_templates: HashMap<String, SectionTemplate>,
 
-    /// Fixed-layout page records parallel to `spine` and `section_names`, one
-    /// per page: `section` names the owning section and `ordinal` the leaf
-    /// index in its spread walk. Empty on a reflowable book.
+    /// Fixed-layout page records parallel to `spine`, one per page; empty on a reflowable book.
     fxl_pages: Vec<FxlPage>,
-    /// Section name → its spread-walked leaf pages, each a container and the
-    /// spread half it occupies, from the section's first page template.
-    /// Walked once at spine expansion; a per-page load indexes it by ordinal.
+    /// Section name → its spread-walked leaf pages (container, spread half), walked once.
     fxl_leaves: HashMap<String, Vec<(IonValue, Option<PageSpread>)>>,
-    /// story_name → storyline entity location, for resolving spread pages
-    /// and container story references without a section hop.
+    /// story_name → storyline location, for spread pages and container story references.
     storylines_by_name: HashMap<String, EntityLoc>,
-    /// Structure ($608) entity name → location, for `page_templates` entries
-    /// holding a symbol reference.
+    /// Structure ($608) entity name → location, for symbol `page_templates` entries.
     structures_by_name: HashMap<String, EntityLoc>,
-    /// Content-walk page-progression direction: `document_data.direction` plus
-    /// the vertical-writing-mode → rtl override, without the reading-order
-    /// override `derive_writing_direction` applies to the OPF value.
+    /// Content-walk page-progression direction: `document_data.direction`, vertical → rtl.
     content_ppd: String,
 
     /// Resources: name -> EntityLoc (lazily populated)
@@ -120,9 +104,7 @@ pub struct KfxImporter {
     /// Whether resources have been indexed
     resources_indexed: bool,
 
-    /// Canonical image list from the shared external_resource walk —
-    /// port-identical filenames, deterministic (sorted-fid) order, cover
-    /// renamed to `cover.<ext>`. Built once in `from_source`.
+    /// Canonical image list from the external_resource walk, the cover named `cover.<ext>`.
     images: Vec<ImageResource>,
     /// resource_name → `images` index (duplicates: last one wins).
     image_by_name: HashMap<String, usize>,
@@ -131,13 +113,9 @@ pub struct KfxImporter {
     /// bcRawMedia location key (resolved entity symbol name) → payload location.
     image_media: HashMap<String, EntityLoc>,
 
-    /// Content (`$145`) entity name → location, built once in `from_source`.
-    /// Text lookups resolve by direct index; first entity wins on duplicate
-    /// names.
+    /// Content (`$145`) entity name → location; the first entity of a name wins.
     content_by_name: HashMap<String, EntityLoc>,
-    /// Content cache: name -> list of strings (lazily populated). Behind a
-    /// lock, letting `lookup_content_text` work from `&self` — chapter builds
-    /// run in parallel across a shared importer reference.
+    /// Content cache: name → its strings, locked for parallel chapter builds over `&self`.
     content_cache: std::sync::RwLock<HashMap<String, Vec<String>>>,
 
     /// Anchor map: anchor_name -> uri (for external link resolution)
@@ -150,34 +128,24 @@ pub struct KfxImporter {
     /// Whether styles have been indexed
     styles_indexed: bool,
 
-    /// Ruby map: ruby_name (e.g. "b_ruby_0") → ordered annotation texts.
-    /// Style events reference entries via `ruby_name`+`ruby_id` (1-indexed).
+    /// Ruby map: ruby_name (e.g. "b_ruby_0") → annotation texts, `ruby_id` counting from 1.
     ruby_index: Arc<HashMap<String, Vec<String>>>,
     /// Whether ruby_content has been indexed
     ruby_indexed: bool,
 
-    /// The shared KFX anchor table: real `$266` anchors plus synthetic
-    /// toc/page anchors at nav target positions. `index_anchor_entities`
-    /// builds it and `load_chapter` stamps `semantics.id` from it.
+    /// The anchor table: `$266` anchors plus synthetic toc/page anchors at nav targets.
     anchor_table: Arc<AnchorTable>,
 
-    /// Maps element string ID -> GlobalNodeId (built during index_anchors).
-    /// Ids are the STAMPED anchor ids (`a85J`, `toc-148-0`, …), the same
-    /// namespace the emitted XHTML carries.
+    /// Stamped anchor id (`a85J`, `toc-148-0`, …) → GlobalNodeId, built in index_anchors.
     element_id_map: HashMap<String, GlobalNodeId>,
 
-    /// Element id (`$155`) → owning chapter, accumulated as chapters load.
-    /// Every eid the parsed storyline holds counts, and a nav target
-    /// resolves its file here.
+    /// Element id (`$155`) → owning chapter, every eid a loaded storyline holds.
     eid_chapters: HashMap<i64, ChapterId>,
 
-    /// Doc-level CSS writing mode from `derive_writing_direction`, feeding the
-    /// stylesheet's `body { writing-mode: … }` header.
-    /// `metadata.primary_writing_mode` holds the OPF-vocabulary form.
+    /// Doc-level CSS writing mode from `derive_writing_direction`, for the `body` rule.
     css_writing_mode: String,
 
-    /// Worker-thread cap for the parallel chapter build and image transcode,
-    /// `0` for the platform's reported parallelism.
+    /// Worker-thread cap for chapter builds and image transcodes; `0` for the platform's.
     max_workers: usize,
 }
 
@@ -427,9 +395,8 @@ impl Importer for KfxImporter {
         true
     }
 
-    /// The `eid → pid → Location` chain, read straight out of the container's
-    /// four position fragments. Amazon ships these on books it produced; a KFX
-    /// converted from an EPUB carries none, and reports no scale.
+    /// The `eid → pid → Location` chain from the container's four position fragments;
+    /// `None` for a KFX without them.
     fn position_map(&mut self) -> Option<PositionMap> {
         let locs: Vec<EntityLoc> = self
             .entities
@@ -759,6 +726,7 @@ impl KfxImporter {
 
     /// Parse book metadata.
     fn parse_metadata(&mut self) -> io::Result<()> {
+        let mut pronunciations: Vec<String> = Vec::new();
         // Find book_metadata entity
         let loc = self
             .entities
@@ -769,8 +737,7 @@ impl KfxImporter {
         if let Some(loc) = loc {
             let elem = self.parse_entity_ion(loc)?;
 
-            // Amazon's KFX wraps as `book_metadata::{...}` (annotated struct);
-            // bokai's own exporter emits a plain struct. Handle both.
+            // An annotated `book_metadata::{...}` struct or a plain one.
             if let Some(fields) = elem.unwrap_annotated().as_struct()
                 && let Some(list) =
                     get_field(fields, sym!(CategorisedMetadata)).and_then(|m| m.as_list())
@@ -803,11 +770,11 @@ impl KfxImporter {
                                     "title" if self.metadata.title.is_empty() => {
                                         self.metadata.title = value.to_string()
                                     }
-                                    // One entry per repeated `author` key,
-                                    // each value pushed verbatim: no trim
-                                    // and no `&` split.
+                                    // One creator per repeated `author` key,
+                                    // each value taken verbatim: no trim and
+                                    // no `&` split.
                                     "author" if !value.is_empty() => {
-                                        self.metadata.authors.push(value.to_string())
+                                        self.metadata.creators.push(Contributor::named(value))
                                     }
                                     "publisher" => {
                                         self.metadata.publisher = Some(value.trim().to_string())
@@ -838,19 +805,16 @@ impl KfxImporter {
                                     "modified_date" => {
                                         self.metadata.modified_date = Some(value.to_string())
                                     }
-                                    "translator" => self.metadata.contributors.push(Contributor {
-                                        name: value.to_string(),
-                                        file_as: None,
-                                        role: Some("trl".to_string()),
-                                    }),
+                                    "translator" => self
+                                        .metadata
+                                        .contributors
+                                        .push(Contributor::named(value).with_role("trl")),
                                     "title_pronunciation" if !value.is_empty() => {
                                         self.metadata.title_sort = Some(value.to_string())
                                     }
-                                    // One entry per repeated key, positional
-                                    // with `author` (Amazon repeats both in
-                                    // the same order).
+                                    // One per repeated key, positional with `author`.
                                     "author_pronunciation" if !value.is_empty() => {
-                                        self.metadata.author_sorts.push(value.to_string())
+                                        pronunciations.push(value.to_string())
                                     }
                                     "series_name" => {
                                         if let Some(ref mut coll) = self.metadata.collection {
@@ -904,6 +868,9 @@ impl KfxImporter {
                 }
             }
         }
+        for (creator, key) in self.metadata.creators.iter_mut().zip(pronunciations) {
+            creator.file_as = Some(key);
+        }
 
         // The flat `$258 metadata` entity fills what `kindle_title_metadata`
         // left empty: `title`, `language`, `publisher`, `author`, `ASIN`,
@@ -945,13 +912,15 @@ impl KfxImporter {
         {
             self.metadata.title = t;
         }
-        if self.metadata.authors.is_empty() {
+        if self.metadata.creators.is_empty() {
             match get_field(&fields, KfxSymbol::Author as u64) {
-                Some(IonValue::String(s)) if !s.is_empty() => self.metadata.authors.push(s.clone()),
+                Some(IonValue::String(s)) if !s.is_empty() => {
+                    self.metadata.creators.push(Contributor::named(s.clone()))
+                }
                 Some(IonValue::List(items)) => {
                     for it in items {
                         if let Some(s) = it.as_string().filter(|s| !s.is_empty()) {
-                            self.metadata.authors.push(s.to_string());
+                            self.metadata.creators.push(Contributor::named(s));
                         }
                     }
                 }
@@ -1587,9 +1556,8 @@ impl KfxImporter {
             .collect();
         let synthetic = IonValue::Struct(vec![(sym!(ContentList), IonValue::List(children))]);
 
-        // Every eid the page subtree declares, the container's own included,
-        // counts for nav-target file resolution. The caller registers them
-        // first-wins across pages.
+        // Every eid the page subtree declares, the container's own included, for nav-target
+        // file resolution, registered first-wins across pages.
         let container_eid = get_field(cfields, sym!(Id)).and_then(|v| v.as_int());
         let mut declared = Vec::new();
         collect_declared_eids(&synthetic, &mut declared);
@@ -2160,9 +2128,8 @@ impl KfxImporter {
             by_name.insert(img.resource_name.clone(), i); // duplicates: last wins
         }
 
-        // Cover: metadata's declared resource name, else the first
-        // reading-order section's full-page image (Amazon KFX often carries
-        // the cover only as that "loc 0" cover page).
+        // Cover: metadata's declared resource name, else the first reading-order section's
+        // full-page image.
         let cover_name = self
             .metadata
             .cover_image

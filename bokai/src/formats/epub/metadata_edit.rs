@@ -2,17 +2,19 @@
 
 use std::collections::HashSet;
 
-use crate::formats::epub::edit::{EpubPackage, attr_value, attributes, escape_text, set_attr};
+use crate::formats::epub::edit::{
+    EpubPackage, attr_value, attributes, escape_attr, escape_text, set_attr,
+};
 use crate::formats::epub::parser::{publication_date_rank, resolve_entity};
-use crate::model::sort_key_survives;
+use crate::model::{Contributor, roles_agree, sort_key_survives};
 
 /// Which OPF metadata fields to set. `None` leaves a field untouched; an empty
 /// value removes the element.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataPatch {
     pub title: Option<String>,
-    /// The full ordered author list, written creator by creator.
-    pub authors: Option<Vec<String>>,
+    /// The creators in order; one stating no role keeps its element's roles.
+    pub creators: Option<Vec<Contributor>>,
     pub language: Option<String>,
     pub publisher: Option<String>,
     /// Publication date (`<dc:date>`).
@@ -25,7 +27,7 @@ impl MetadataPatch {
     /// unchanged.
     pub fn is_empty(&self) -> bool {
         self.title.is_none()
-            && self.authors.is_none()
+            && self.creators.is_none()
             && self.language.is_none()
             && self.publisher.is_none()
             && self.date.is_none()
@@ -85,8 +87,8 @@ fn rewrite_metadata(opf: &str, patch: &MetadataPatch) -> String {
     if let Some(a) = &patch.asin {
         s = set_asin(&s, a);
     }
-    if let Some(authors) = &patch.authors {
-        s = set_creators(&s, authors);
+    if let Some(creators) = &patch.creators {
+        s = set_creators(&s, creators);
     }
     s
 }
@@ -185,80 +187,248 @@ fn set_single(opf: &str, tag: &str, value: &str, which: Pick) -> String {
     }
 }
 
-/// Rewrite the `<dc:creator>` run to `authors`, position by position: a renamed
-/// creator keeps its element, and its `file-as` only when [`sort_key_survives`];
-/// surplus creators go with their refinements, and extra `authors` follow the last.
-fn set_creators(opf: &str, authors: &[String]) -> String {
-    let creators = dc_elements(opf, "creator");
-    let mut taken = ids_in(opf);
-    let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    // (creator id, whether every refinement of it goes or only the name-derived ones)
-    let mut stale: Vec<(String, bool)> = Vec::new();
+/// What a creator's edit takes from the refinements of its element.
+enum Stale {
+    /// Every refinement: the creator goes.
+    Every,
+    /// The ones spelling its name (`file-as`, `alternate-script`).
+    NameDerived,
+    /// Its `role` statements, which new ones replace.
+    Roles,
+}
 
-    for (i, c) in creators.iter().enumerate() {
+impl Stale {
+    fn covers(&self, property: &str) -> bool {
+        match self {
+            Stale::Every => true,
+            Stale::NameDerived => name_derived(property),
+            Stale::Roles => property.rsplit(':').next() == Some("role"),
+        }
+    }
+}
+
+/// How one kept creator changes.
+struct CreatorEdit {
+    renamed: bool,
+    keeps_sort_key: bool,
+    roles_change: bool,
+    /// A different person stating no role, who takes none of the element's.
+    drops_roles: bool,
+}
+
+/// Rewrite the `<dc:creator>` run to `creators` place by place: a renamed creator keeps its
+/// element, and its `file-as` and roles while [`sort_key_survives`]; stated roles replace the
+/// element's (EPUB 3 refinements, EPUB 2 `opf:role`); surplus ones go, extra ones follow the last.
+fn set_creators(opf: &str, creators: &[Contributor]) -> String {
+    let epub3 = package_version(opf).is_none_or(|v| v.starts_with('3'));
+
+    // The refinements that go are stripped first, against the input's ids.
+    let mut plan: Vec<Option<CreatorEdit>> = Vec::new();
+    let mut stale: Vec<(String, Stale)> = Vec::new();
+    for (i, c) in dc_elements(opf, "creator").iter().enumerate() {
         let start_tag = c.start_tag(opf);
         let id = attr_value(start_tag, "id");
-        let Some(new) = authors.get(i) else {
-            let (s, e) = line_span(opf, c.start, c.end);
-            edits.push((s, e, String::new()));
-            stale.extend(id.map(|id| (id, true)));
+        let Some(new) = creators.get(i) else {
+            stale.extend(id.map(|id| (id, Stale::Every)));
+            plan.push(None);
             continue;
         };
         let old = c.text(opf);
-        if old == *new {
-            continue;
+        let renamed = old != new.name;
+        let keeps_sort_key = !renamed || sort_key_survives(&old, &new.name);
+        let roles_change = !new.roles.is_empty()
+            && !roles_agree(&stated_roles(opf, start_tag, id.as_deref()), &new.roles);
+        let drops_roles = !keeps_sort_key && new.roles.is_empty();
+        if let Some(id) = id {
+            if !keeps_sort_key {
+                stale.push((id.clone(), Stale::NameDerived));
+            }
+            if roles_change || drops_roles {
+                stale.push((id, Stale::Roles));
+            }
         }
-        let keeps_sort_key = sort_key_survives(&old, new);
-        let tag = if keeps_sort_key {
-            start_tag.to_string()
-        } else {
-            without_file_as(start_tag)
-        };
-        edits.push((c.start, c.text.1, format!("{tag}{}", escape_text(new))));
-        if !keeps_sort_key {
-            stale.extend(id.map(|id| (id, false)));
-        }
+        plan.push(Some(CreatorEdit {
+            renamed,
+            keeps_sort_key,
+            roles_change,
+            drops_roles,
+        }));
     }
-
-    let extra = authors.get(creators.len()..).unwrap_or_default();
-    if let Some(last) = creators.last()
-        && !extra.is_empty()
-    {
-        let indent = indent_of(opf, last.start);
-        let added: String = extra
+    let opf = strip_refines(opf, |id, property| {
+        stale
             .iter()
-            .map(|a| {
-                format!(
-                    "\n{indent}<dc:creator id=\"{}\">{}</dc:creator>",
-                    free_id(&mut taken),
-                    escape_text(a)
-                )
-            })
-            .collect();
-        edits.push((last.end, last.end, added));
+            .any(|(s, what)| s == id && what.covers(property))
+    });
+
+    let elements = dc_elements(&opf, "creator");
+    let mut taken = ids_in(&opf);
+    let mut writes_opf_attr = false;
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let extra = creators.get(elements.len()..).unwrap_or_default();
+    for (i, (c, edit)) in elements.iter().zip(&plan).enumerate() {
+        let Some(edit) = edit else {
+            let (s, e) = line_span(&opf, c.start, c.end);
+            edits.push((s, e, String::new()));
+            continue;
+        };
+        let new = &creators[i];
+        let indent = indent_of(&opf, c.start);
+        let old_tag = c.start_tag(&opf);
+        let mut tag = if edit.keeps_sort_key {
+            old_tag.to_string()
+        } else {
+            without_local(old_tag, "file-as")
+        };
+        if edit.drops_roles {
+            tag = without_local(&tag, "role");
+        }
+        let mut after = String::new();
+        if edit.roles_change {
+            tag = without_local(&tag, "role");
+            if epub3 {
+                let id = match attr_value(&tag, "id") {
+                    Some(id) => id,
+                    None => {
+                        let id = free_id(&mut taken);
+                        tag = set_attr(&tag, "id", Some(&id));
+                        id
+                    }
+                };
+                after.push_str(&role_refinements(&id, &new.roles, indent));
+            } else {
+                tag = set_attr(&tag, "opf:role", Some(&new.roles[0]));
+                writes_opf_attr = true;
+            }
+        }
+        if i + 1 == elements.len() {
+            after.push_str(&extra_creators(
+                extra,
+                indent,
+                epub3,
+                &mut taken,
+                &mut writes_opf_attr,
+            ));
+        }
+        if edit.renamed || tag != old_tag {
+            let text = if edit.renamed {
+                escape_text(&new.name)
+            } else {
+                opf[c.text.0..c.text.1].to_string()
+            };
+            edits.push((c.start, c.text.1, format!("{tag}{text}")));
+        }
+        if !after.is_empty() {
+            edits.push((c.end, c.end, after));
+        }
     }
 
     edits.sort_by_key(|&(start, _, _)| std::cmp::Reverse(start));
-    let mut out = opf.to_string();
+    let mut out = opf;
     for (start, end, text) in edits {
         out.replace_range(start..end, &text);
     }
-    let mut out = strip_refines(&out, |id, property| {
-        stale
-            .iter()
-            .any(|(s, every)| s == id && (*every || name_derived(property)))
-    });
-    if creators.is_empty() {
-        for a in extra {
-            let element = format!(
-                "<dc:creator id=\"{}\">{}</dc:creator>",
-                free_id(&mut taken),
-                escape_text(a)
-            );
-            out = inject_into_metadata(&out, &element);
+    if elements.is_empty() {
+        for line in extra_creators(extra, "", epub3, &mut taken, &mut writes_opf_attr).lines() {
+            if !line.is_empty() {
+                out = inject_into_metadata(&out, line);
+            }
+        }
+    }
+    if writes_opf_attr {
+        out = declare_opf_prefix(&out);
+    }
+    out
+}
+
+/// The `<dc:creator>` elements for `extra`, each on its own line after `indent`
+/// under a fresh id, with its roles (refinements in EPUB 3, else `opf:role`).
+fn extra_creators(
+    extra: &[Contributor],
+    indent: &str,
+    epub3: bool,
+    taken: &mut HashSet<String>,
+    writes_opf_attr: &mut bool,
+) -> String {
+    let mut out = String::new();
+    for c in extra {
+        let id = free_id(taken);
+        let role_attr = match c.roles.first() {
+            Some(role) if !epub3 => {
+                *writes_opf_attr = true;
+                format!(" opf:role=\"{}\"", escape_attr(role))
+            }
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "\n{indent}<dc:creator id=\"{id}\"{role_attr}>{}</dc:creator>",
+            escape_text(&c.name)
+        ));
+        if epub3 {
+            out.push_str(&role_refinements(&id, &c.roles, indent));
         }
     }
     out
+}
+
+/// One `role` refinement of `#id` per role, each on its own line after `indent`.
+fn role_refinements(id: &str, roles: &[String], indent: &str) -> String {
+    roles
+        .iter()
+        .map(|role| {
+            format!(
+                "\n{indent}<meta refines=\"#{id}\" property=\"role\" scheme=\"marc:relators\">{}</meta>",
+                escape_text(role)
+            )
+        })
+        .collect()
+}
+
+/// The roles a creator's element states: its `role` attribute (EPUB 2), then the
+/// `role` refinements of its id, as the parser reads them.
+fn stated_roles(opf: &str, start_tag: &str, id: Option<&str>) -> Vec<String> {
+    let mut roles: Vec<String> = local_attr(start_tag, "role").into_iter().collect();
+    if let Some(id) = id {
+        for m in meta_elements(opf) {
+            let tag = &opf[m.start..m.tag_end];
+            let refines = attr_value(tag, "refines");
+            let property = attr_value(tag, "property").unwrap_or_default();
+            if refines.as_deref().and_then(|r| r.strip_prefix('#')) == Some(id)
+                && property.rsplit(':').next() == Some("role")
+            {
+                roles.push(match m.text {
+                    Some((s, e)) => decode(&opf[s..e]),
+                    None => attr_value(tag, "content").unwrap_or_default(),
+                });
+            }
+        }
+    }
+    roles
+}
+
+/// The `version` of the `<package>` element, if the text has one.
+fn package_version(opf: &str) -> Option<String> {
+    let start = opf.find("<package")?;
+    let end = start + opf[start..].find('>')?;
+    attr_value(&opf[start..=end], "version")
+}
+
+/// `opf` with the `opf:` prefix declared on `<metadata>` when nothing declares it.
+fn declare_opf_prefix(opf: &str) -> String {
+    if opf.contains("xmlns:opf=") {
+        return opf.to_string();
+    }
+    let Some(start) = opf.find("<metadata") else {
+        return opf.to_string();
+    };
+    let Some(end) = opf[start..].find('>').map(|p| start + p) else {
+        return opf.to_string();
+    };
+    let tag = set_attr(
+        &opf[start..=end],
+        "xmlns:opf",
+        Some("http://www.idpf.org/2007/opf"),
+    );
+    format!("{}{tag}{}", &opf[..start], &opf[end + 1..])
 }
 
 /// Whether `property` spells the name it refines (`file-as`, `alternate-script`).
@@ -269,11 +439,11 @@ fn name_derived(property: &str) -> bool {
     )
 }
 
-/// `tag` without its `file-as` attribute, whatever its prefix.
-fn without_file_as(tag: &str) -> String {
+/// `tag` without the attributes whose local name is `local`, whatever their prefix.
+fn without_local(tag: &str, local: &str) -> String {
     attributes(tag)
         .iter()
-        .filter(|a| a.name.rsplit(':').next() == Some("file-as"))
+        .filter(|a| a.name.rsplit(':').next() == Some(local))
         .fold(tag.to_string(), |t, a| set_attr(&t, &a.name, None))
 }
 
@@ -345,44 +515,68 @@ fn remove_element(opf: &str, e: &Element) -> String {
     }
 }
 
+/// One `<meta>` element: where it starts, where its start tag ends, its text
+/// (none when self-closing) and where it ends.
+struct MetaElement {
+    start: usize,
+    tag_end: usize,
+    text: Option<(usize, usize)>,
+    end: usize,
+}
+
+/// Every `<meta>` element of `opf`, in document order.
+fn meta_elements(opf: &str) -> Vec<MetaElement> {
+    let mut out = Vec::new();
+    let mut scan = 0;
+    while let Some(rel) = opf[scan..].find("<meta") {
+        let start = scan + rel;
+        // Tag-boundary guard: skip `<metadata`, match only the `<meta` element.
+        let after = opf.as_bytes().get(start + 5).copied().unwrap_or(b'>');
+        if !(after == b'>' || after == b'/' || after.is_ascii_whitespace()) {
+            scan = start + 5;
+            continue;
+        }
+        let Some(gt) = opf[start..].find('>').map(|p| start + p) else {
+            break;
+        };
+        let (text, end) = if opf.as_bytes()[gt - 1] == b'/' {
+            (None, gt + 1)
+        } else {
+            match opf[gt + 1..].find("</meta>") {
+                Some(c) => (Some((gt + 1, gt + 1 + c)), gt + 1 + c + "</meta>".len()),
+                None => (None, gt + 1),
+            }
+        };
+        out.push(MetaElement {
+            start,
+            tag_end: gt + 1,
+            text,
+            end,
+        });
+        scan = end;
+    }
+    out
+}
+
 /// Remove every `<meta refines="#id" property="…">` (and self-closing form) for
 /// which `drop(id, property)` holds, each with its line when it stood alone.
 fn strip_refines(opf: &str, drop: impl Fn(&str, &str) -> bool) -> String {
     let mut out = String::with_capacity(opf.len());
     let mut copied = 0;
-    let mut scan = 0;
-    while let Some(rel) = opf[scan..].find("<meta") {
-        let mstart = scan + rel;
-        // Tag-boundary guard: skip `<metadata`, match only the `<meta` element.
-        let after = opf.as_bytes().get(mstart + 5).copied().unwrap_or(b'>');
-        if !(after == b'>' || after == b'/' || after.is_ascii_whitespace()) {
-            scan = mstart + 5;
+    for m in meta_elements(opf) {
+        if m.start < copied {
             continue;
         }
-        let Some(gt) = opf[mstart..].find('>').map(|p| mstart + p) else {
-            break;
-        };
-        let elem_end = if opf.as_bytes()[gt - 1] == b'/' {
-            gt + 1
-        } else {
-            match opf[gt + 1..].find("</meta>") {
-                Some(c) => gt + 1 + c + "</meta>".len(),
-                None => gt + 1,
-            }
-        };
-        let tag = &opf[mstart..=gt];
+        let tag = &opf[m.start..m.tag_end];
         let property = attr_value(tag, "property").unwrap_or_default();
         let hit = attr_value(tag, "refines")
             .as_deref()
             .and_then(|r| r.strip_prefix('#'))
             .is_some_and(|id| drop(id, &property));
         if hit {
-            let (start, end) = line_span(opf, mstart, elem_end);
+            let (start, end) = line_span(opf, m.start, m.end);
             out.push_str(&opf[copied..start]);
             copied = end;
-            scan = end;
-        } else {
-            scan = elem_end;
         }
     }
     out.push_str(&opf[copied..]);
@@ -455,12 +649,23 @@ fn set_asin(opf: &str, asin: &str) -> String {
     )
 }
 
-/// Insert `element` just before `</metadata>`, indented; an `opf` without
-/// `</metadata>` comes back unchanged.
+/// Insert `element` just before `</metadata>`: on a line of its own above a
+/// closing tag that stands alone, one level deeper, else right before the tag. An
+/// `opf` without `</metadata>` comes back unchanged.
 fn inject_into_metadata(opf: &str, element: &str) -> String {
-    match opf.rfind("</metadata>") {
-        Some(pos) => format!("{}  {element}\n{}", &opf[..pos], &opf[pos..]),
-        None => opf.to_string(),
+    let Some(pos) = opf.rfind("</metadata>") else {
+        return opf.to_string();
+    };
+    let line_start = opf[..pos].rfind('\n').map_or(0, |p| p + 1);
+    let lead = &opf[line_start..pos];
+    if lead.trim().is_empty() {
+        format!(
+            "{}{lead}  {element}\n{}",
+            &opf[..line_start],
+            &opf[line_start..]
+        )
+    } else {
+        format!("{}  {element}\n{}", &opf[..pos], &opf[pos..])
     }
 }
 
@@ -539,7 +744,7 @@ mod tests {
     fn a_flipped_author_changes_only_the_creator_text() {
         let epub = epub_with(EPUB2);
         let patch = MetadataPatch {
-            authors: Some(vec!["Jane Doe".into()]),
+            creators: Some(named(&["Jane Doe"])),
             ..Default::default()
         };
         let out = edit_metadata(&epub, &patch).unwrap();
@@ -549,26 +754,40 @@ mod tests {
             "the role and the sort key stay, every other line is untouched"
         );
         let after = reopen(&out);
-        assert_eq!(after.metadata().authors, vec!["Jane Doe"]);
-        assert_eq!(after.metadata().author_sorts, vec!["Doe, Jane"]);
+        assert_eq!(after.metadata().creator_names(), ["Jane Doe"]);
+        assert_eq!(after.metadata().creator_sort_keys(), ["Doe, Jane"]);
     }
 
     #[test]
-    fn a_different_author_loses_the_old_sort_key_but_keeps_the_role() {
-        let out = set_creators(EPUB2, &["Ann Writer".to_string()]);
-        assert!(
-            out.contains("<dc:creator opf:role=\"aut\">Ann Writer</dc:creator>"),
-            "{out}"
-        );
+    fn a_different_person_takes_neither_the_old_sort_key_nor_the_old_role() {
+        let out = set_creators(EPUB2, &named(&["Ann Writer"]));
+        assert!(out.contains("<dc:creator>Ann Writer</dc:creator>"), "{out}");
         assert!(!out.contains("Doe, Jane"));
+
+        let stated = set_creators(EPUB2, &[Contributor::named("Ann Writer").with_role("ill")]);
+        assert!(
+            stated.contains("<dc:creator opf:role=\"ill\">Ann Writer</dc:creator>"),
+            "{stated}"
+        );
+
+        let illustrated = EPUB3_CREATORS.replace(
+            "<meta refines=\"#creator2\" property=\"file-as\">Roe, John</meta>",
+            "<meta refines=\"#creator2\" property=\"role\" scheme=\"marc:relators\">ill</meta>",
+        );
+        let out = set_creators(&illustrated, &named(&["Roe, John"]));
+        assert_eq!(
+            roles_of(&out),
+            [("Roe, John".to_string(), Vec::<String>::new())]
+        );
+        assert!(
+            !out.contains(">ill<"),
+            "the illustrator's role leaves with the illustrator: {out}"
+        );
     }
 
     #[test]
     fn epub3_refinements_follow_the_same_rule() {
-        let out = set_creators(
-            EPUB3_CREATORS,
-            &["Jane Doe".to_string(), "Ann Writer".to_string()],
-        );
+        let out = set_creators(EPUB3_CREATORS, &named(&["Jane Doe", "Ann Writer"]));
         assert!(out.contains("<dc:creator id=\"creator1\">Jane Doe</dc:creator>"));
         assert!(
             out.contains("<meta refines=\"#creator1\" property=\"file-as\">Doe, Jane</meta>"),
@@ -584,7 +803,7 @@ mod tests {
 
     #[test]
     fn surplus_creators_go_with_every_refinement() {
-        let out = set_creators(EPUB3_CREATORS, &["Doe, Jane".to_string()]);
+        let out = set_creators(EPUB3_CREATORS, &named(&["Doe, Jane"]));
         assert_eq!(out.matches("<dc:creator").count(), 1);
         assert!(!out.contains("#creator2"), "{out}");
         assert!(
@@ -598,11 +817,7 @@ mod tests {
     fn extra_authors_follow_the_last_creator_under_fresh_ids() {
         let out = set_creators(
             EPUB3_CREATORS,
-            &[
-                "Doe, Jane".to_string(),
-                "Roe, John".to_string(),
-                "Ann Writer".to_string(),
-            ],
+            &named(&["Doe, Jane", "Roe, John", "Ann Writer"]),
         );
         assert!(
             out.contains(
@@ -611,15 +826,157 @@ mod tests {
             "{out}"
         );
         assert_eq!(
-            reopen_opf(&out).metadata.authors,
+            reopen_opf(&out).metadata.creator_names(),
             ["Doe, Jane", "Roe, John", "Ann Writer"]
+        );
+    }
+
+    fn named(names: &[&str]) -> Vec<Contributor> {
+        names.iter().map(|n| Contributor::named(*n)).collect()
+    }
+
+    fn roles_of(opf: &str) -> Vec<(String, Vec<String>)> {
+        reopen_opf(opf)
+            .metadata
+            .creators
+            .into_iter()
+            .map(|c| (c.name, c.roles))
+            .collect()
+    }
+
+    #[test]
+    fn a_changed_role_replaces_the_element_s_role_refinements() {
+        let creators = vec![
+            Contributor::named("Doe, Jane").with_role("aut"),
+            Contributor::named("Roe, John").with_role("ill"),
+        ];
+        let out = set_creators(EPUB3_CREATORS, &creators);
+        assert_eq!(
+            out,
+            EPUB3_CREATORS.replace(
+                "<dc:creator id=\"creator2\">Roe, John</dc:creator>\n",
+                "<dc:creator id=\"creator2\">Roe, John</dc:creator>\n    \
+                 <meta refines=\"#creator2\" property=\"role\" scheme=\"marc:relators\">ill</meta>\n"
+            ),
+            "the agreeing creator is left byte for byte"
+        );
+        assert_eq!(
+            roles_of(&out),
+            [
+                ("Doe, Jane".to_string(), vec!["aut".to_string()]),
+                ("Roe, John".to_string(), vec!["ill".to_string()]),
+            ]
+        );
+
+        let back = set_creators(&out, &named(&["Doe, Jane", "Roe, John"]));
+        assert_eq!(back, out, "a creator stating no role keeps the element's");
+        let author_again = set_creators(
+            &out,
+            &[
+                Contributor::named("Doe, Jane"),
+                Contributor::named("Roe, John").with_role("aut"),
+            ],
+        );
+        assert!(
+            author_again.contains(
+                "<dc:creator id=\"creator2\">Roe, John</dc:creator>\n    \
+                 <meta refines=\"#creator2\" property=\"role\" scheme=\"marc:relators\">aut</meta>"
+            ),
+            "{author_again}"
+        );
+        assert!(!author_again.contains(">ill<"));
+    }
+
+    #[test]
+    fn a_creator_stating_no_role_agrees_with_one_stated_as_author() {
+        let opf = "<metadata>\n  <dc:creator>Ann Writer</dc:creator>\n</metadata>";
+        let author = [Contributor::named("Ann Writer").with_role("AUT")];
+        assert_eq!(set_creators(opf, &author), opf);
+    }
+
+    #[test]
+    fn an_epub3_creator_without_an_id_gains_one_for_its_role() {
+        let opf = "<package version=\"3.0\">\n<metadata>\n  <dc:creator>絵師 花子</dc:creator>\n</metadata>\n</package>";
+        let out = set_creators(opf, &[Contributor::named("絵師 花子").with_role("ill")]);
+        assert!(
+            out.contains(
+                "<dc:creator id=\"creator1\">絵師 花子</dc:creator>\n  \
+                 <meta refines=\"#creator1\" property=\"role\" scheme=\"marc:relators\">ill</meta>"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_epub2_role_is_the_opf_role_attribute() {
+        let out = set_creators(EPUB2, &[Contributor::named("Doe, Jane").with_role("edt")]);
+        assert!(
+            out.contains(
+                "<dc:creator opf:file-as=\"Doe, Jane\" opf:role=\"edt\">Doe, Jane</dc:creator>"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("refines"), "EPUB 2 has no refinements: {out}");
+
+        let bare = EPUB2.replace(" xmlns:opf=\"http://www.idpf.org/2007/opf\"", "");
+        let extra = set_creators(
+            &bare,
+            &[
+                Contributor::named("Doe, Jane"),
+                Contributor::named("Ann Writer").with_role("ill"),
+            ],
+        );
+        assert!(
+            extra.contains("<dc:creator id=\"creator1\" opf:role=\"ill\">Ann Writer</dc:creator>"),
+            "{extra}"
+        );
+        assert!(
+            extra.contains("xmlns:opf=\"http://www.idpf.org/2007/opf\""),
+            "the prefix the attribute uses is declared: {extra}"
+        );
+    }
+
+    #[test]
+    fn injected_elements_line_up_above_the_closing_tag() {
+        let opf = "<package version=\"3.0\">\n  <metadata>\n    <dc:title>T</dc:title>\n  </metadata>\n</package>";
+        let out = set_creators(
+            opf,
+            &[
+                Contributor::named("編者 一").with_role("edt"),
+                Contributor::named("編者 二"),
+            ],
+        );
+        assert_eq!(
+            out,
+            "<package version=\"3.0\">\n  <metadata>\n    <dc:title>T</dc:title>\n    \
+             <dc:creator id=\"creator1\">編者 一</dc:creator>\n    \
+             <meta refines=\"#creator1\" property=\"role\" scheme=\"marc:relators\">edt</meta>\n    \
+             <dc:creator id=\"creator2\">編者 二</dc:creator>\n  </metadata>\n</package>"
+        );
+    }
+
+    #[test]
+    fn extra_creators_carry_their_roles() {
+        let out = set_creators(
+            "<metadata>\n  <dc:title>読本</dc:title>\n</metadata>",
+            &[
+                Contributor::named("編者 一").with_role("edt"),
+                Contributor::named("編者 二").with_role("edt"),
+            ],
+        );
+        assert_eq!(
+            roles_of(&out),
+            [
+                ("編者 一".to_string(), vec!["edt".to_string()]),
+                ("編者 二".to_string(), vec!["edt".to_string()]),
+            ]
         );
     }
 
     #[test]
     fn a_book_without_creators_gains_them() {
         let opf = "<metadata>\n  <dc:title>T</dc:title>\n</metadata>";
-        let out = set_creators(opf, &["Ann Writer".to_string()]);
+        let out = set_creators(opf, &named(&["Ann Writer"]));
         assert!(out.contains("<dc:creator id=\"creator1\">Ann Writer</dc:creator>"));
     }
 
@@ -669,7 +1026,7 @@ mod tests {
         let epub = epub_with(EPUB2);
         let patch = MetadataPatch {
             title: Some("Old Title".into()),
-            authors: Some(vec!["Doe, Jane".into()]),
+            creators: Some(named(&["Doe, Jane"])),
             language: Some("en".into()),
             publisher: Some("Old Press".into()),
             date: Some("2020-02-01".into()),
@@ -689,7 +1046,7 @@ mod tests {
         let after = reopen(&edit_metadata(&epub, &patch).unwrap());
         assert_eq!(after.metadata().title, "New Title");
         assert_eq!(after.metadata().publisher.as_deref(), Some("New Press"));
-        assert_eq!(after.metadata().authors, vec!["Doe, Jane"], "untouched");
+        assert_eq!(after.metadata().creator_names(), ["Doe, Jane"], "untouched");
         assert_eq!(after.metadata().date.as_deref(), Some("2020-02-01"));
     }
 
@@ -727,7 +1084,7 @@ mod tests {
     fn escapes_xml_metacharacters() {
         let patch = MetadataPatch {
             title: Some("Q&A:<Draft>".into()),
-            authors: Some(vec!["Smith & Jones".into()]),
+            creators: Some(named(&["Smith & Jones"])),
             ..Default::default()
         };
         let out = edit_metadata(&epub_with(EPUB2), &patch).unwrap();
@@ -738,14 +1095,14 @@ mod tests {
         );
         assert!(!opf.contains("Q&A:<Draft>"), "no raw metacharacters");
         assert_eq!(reopen(&out).metadata().title, "Q&A:<Draft>");
-        assert_eq!(reopen(&out).metadata().authors, vec!["Smith & Jones"]);
+        assert_eq!(reopen(&out).metadata().creator_names(), ["Smith & Jones"]);
     }
 
     #[test]
     fn an_escaped_name_reads_as_its_text() {
         let opf = "<metadata>\n<dc:creator>Smith &amp; Jones</dc:creator>\n</metadata>";
         assert_eq!(
-            set_creators(opf, &["Smith & Jones".to_string()]),
+            set_creators(opf, &named(&["Smith & Jones"])),
             opf,
             "an unchanged name is left byte for byte"
         );

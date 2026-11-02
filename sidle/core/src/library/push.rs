@@ -233,7 +233,7 @@ mod tests {
             &NewBook {
                 sha256: "sha",
                 title: "A Book",
-                author: "Author",
+                credits: &crate::library::credits::from_author_line("Author"),
                 language: "en",
                 ppd: None,
                 epub_path: None,
@@ -700,7 +700,7 @@ mod tests {
             &NewBook {
                 sha256: title,
                 title,
-                author: "Author",
+                credits: &crate::library::credits::from_author_line("Author"),
                 language: "en",
                 ppd: None,
                 epub_path: None,

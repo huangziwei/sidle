@@ -1,10 +1,10 @@
 pub mod anchor;
 pub mod apps;
-pub mod authors;
 pub mod backup;
 pub mod convert;
 pub mod cover;
 pub mod cover_fetch;
+pub mod credits;
 pub mod daemon;
 pub mod db;
 pub mod device;

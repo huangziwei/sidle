@@ -25,8 +25,8 @@ pub(crate) mod util;
 
 // exports from model
 pub use model::{
-    Book, Chapter, ContentBlock, Format, Metadata, Node, NodeId, Resource, Role, SectionNode,
-    SectionTree, SemanticMap, TextRange, TocEntry, extract_section_tree,
+    Book, Chapter, ContentBlock, Contributor, Format, Metadata, Node, NodeId, Resource, Role,
+    SectionNode, SectionTree, SemanticMap, TextRange, TocEntry, extract_section_tree,
 };
 
 // exports from style

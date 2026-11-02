@@ -1,7 +1,7 @@
 //! What a MOBI/KF8 file's headers say about the book.
 
 use crate::formats::mobi::{ExthHeader, MobiHeader, PdbInfo};
-use crate::model::{CollectionInfo, Metadata, OrientationLock};
+use crate::model::{CollectionInfo, Contributor, Metadata, OrientationLock};
 
 /// Read the book's metadata out of the headers.
 pub fn from_headers(pdb: &PdbInfo, mobi: &MobiHeader, exth: &Option<ExthHeader>) -> Metadata {
@@ -49,8 +49,6 @@ fn issue_title(title: &str, date: Option<&str>) -> String {
 const ISSUE_DATE_SEPARATOR: &str = " — ";
 
 /// [`issue_title`] undone: the publication name inside an issue title.
-///
-/// A masthead shows the date in its own right and wants the publication.
 pub(crate) fn publication_title<'a>(title: &'a str, date: Option<&str>) -> &'a str {
     date.map(crate::util::truncate_to_date)
         .filter(|d| !d.is_empty())
@@ -73,9 +71,17 @@ fn periodical_kind(
 
 /// Everything the EXTH records say beyond the title.
 fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
-    metadata.authors = exth.authors.clone();
+    // `author_pronunciations` keys `authors` by position.
+    metadata.creators = exth
+        .authors
+        .iter()
+        .enumerate()
+        .map(|(i, name)| Contributor {
+            file_as: exth.author_pronunciations.get(i).cloned(),
+            ..Contributor::named(name.clone())
+        })
+        .collect();
     metadata.title_sort = exth.title_pronunciation.clone();
-    metadata.author_sorts = exth.author_pronunciations.clone();
     metadata.publisher = exth.publisher.clone();
     metadata.description = exth.description.clone();
     metadata.subjects = exth.subjects.clone();
@@ -88,26 +94,20 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
         .or_else(|| exth.asin.clone())
         .or_else(|| exth.source.clone())
         .unwrap_or_default();
-    // EXTH 113 nominally holds an ASIN, but calibre's exporter writes a fresh UUID.
-    // Promote to `metadata.asin` only when the value looks like a real one.
+    // `looks_like_asin` keeps the UUIDs EXTH 113 also carries out of `metadata.asin`.
     metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
-    // The series a store title states inline (EXTH 503) — the format has no
-    // field of its own for it. No position comes with it: the annotation names
-    // the series and nothing else.
+    // The series a store title states inline (EXTH 503), with no position.
     metadata.collection = exth.series.as_ref().map(|name| CollectionInfo {
         name: name.clone(),
         collection_type: Some("series".to_string()),
         position: None,
     });
-    // Writing-mode signals (EXTH 525 / 527). Both calibre-exported and native
-    // Amazon files carry these; no fallback to inline HTML class needed.
-    // Calibre's `reader/headers.py` is the spec.
+    // Writing-mode signals: EXTH 525 and 527.
     metadata.primary_writing_mode = exth.primary_writing_mode.clone();
     metadata.page_progression_direction = exth
         .page_progression_direction
         .clone()
-        // Calibre derives PPD from writing-mode when EXTH 527 is absent:
-        // anything ending `-rl` is RTL pagination.
+        // `rtl` for a writing mode ending `-rl` when EXTH 527 states no direction.
         .or_else(|| {
             exth.primary_writing_mode.as_deref().and_then(|pwm| {
                 if pwm.ends_with("-rl") {
@@ -120,7 +120,7 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
             })
         });
 
-    // Any of the three FXL EXTH records marks the book pre-paginated.
+    // `fixed_layout` holds for any of the three FXL EXTH records.
     let book_type = exth.book_type.clone().filter(|s| !s.is_empty());
     let is_comic = book_type.as_deref() == Some("comic");
     metadata.fixed_layout = exth.fixed_layout.as_deref() == Some("true")
@@ -141,9 +141,7 @@ fn apply_exth(metadata: &mut Metadata, exth: &ExthHeader) {
     }
 }
 
-/// Amazon ASIN format: exactly 10 ASCII alphanumeric characters, typically
-/// starting with `B` for ebook listings. Used to disambiguate EXTH 113 from
-/// the UUID calibre's exporter occasionally writes into the same slot.
+/// An ASIN: exactly 10 ASCII alphanumeric characters, unlike the UUIDs EXTH 113 also carries.
 fn looks_like_asin(s: &str) -> bool {
     s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
@@ -177,8 +175,7 @@ mod tests {
         let collection = meta.collection.expect("the series the title stated");
         assert_eq!(collection.name, "灯台守の日々");
         assert_eq!(collection.collection_type.as_deref(), Some("series"));
-        // The annotation carries no number, and guessing one would be worse
-        // than leaving it to whoever knows.
+        // `position` stays unset: the annotation carries no number.
         assert_eq!(collection.position, None);
     }
 
@@ -193,8 +190,6 @@ mod tests {
 
     #[test]
     fn a_fixed_layout_record_survives_the_reading_both_importers_share() {
-        // Both importers share one reading of the KF8-only records, so neither
-        // route can drop what the other keeps.
         let meta = read(ExthHeader {
             book_type: Some("comic".to_string()),
             original_resolution: Some("1444x2048".to_string()),
@@ -250,7 +245,7 @@ mod tests {
     fn either_declaration_alone_marks_a_periodical() {
         // The real `.pobi` shape: both signals agree.
         assert_eq!(kind(259, Some("MAGZ")), Some(PeriodicalKind::Magazine));
-        // Either alone is enough — a rebuild can keep one and drop the other.
+        // `kind` needs either signal alone.
         assert_eq!(kind(259, None), Some(PeriodicalKind::Magazine));
         assert_eq!(kind(2, Some("MAGZ")), Some(PeriodicalKind::Magazine));
         // The other two flavours, by header type and by cdetype.
@@ -262,18 +257,17 @@ mod tests {
 
     #[test]
     fn an_issue_is_titled_by_its_date() {
-        // Every issue's title field says only the publication, so the date is
-        // the only thing that tells two tiles apart.
+        // `issue_title` appends the date, the one field telling two issues apart.
         assert_eq!(
             issue_title("The New Yorker", Some("2014-12-14 23:00:00+00:00")),
             "The New Yorker — 2014-12-14"
         );
-        // Idempotent — a converted file re-imported does not grow a second date.
+        // `issue_title` adds no second date to a title ending in it.
         assert_eq!(
             issue_title("The New Yorker — 2014-12-14", Some("2014-12-14")),
             "The New Yorker — 2014-12-14"
         );
-        // Nothing to add without a date.
+        // `issue_title` returns a title as it is without a date.
         assert_eq!(issue_title("The New Yorker", None), "The New Yorker");
         assert_eq!(issue_title("The New Yorker", Some("")), "The New Yorker");
     }
@@ -285,8 +279,8 @@ mod tests {
             publication_title(&dated, Some("2014-12-14 23:00:00+00:00")),
             "The New Yorker"
         );
-        // A title that never carried a date, or a date that is not its suffix,
-        // is returned whole.
+        // `publication_title` returns whole a title that never carried a date, or whose
+        // suffix is another date.
         assert_eq!(
             publication_title("The New Yorker", Some("2014-12-14")),
             "The New Yorker"

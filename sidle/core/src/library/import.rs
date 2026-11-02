@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
+use crate::library::credits::{self, Credit};
 use crate::library::db::{self, BookRow, NewBook};
+use crate::library::metadata;
 use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
-use crate::library::{authors, metadata};
 
 pub fn import_file(
     conn: &rusqlite::Connection,
@@ -218,7 +219,7 @@ impl Canonical {
 fn file_metadata(meta: &BookMeta) -> metadata::FileMetadata {
     metadata::FileMetadata {
         title: meta.title.clone(),
-        authors: authors::split_display(&authors::join_display(&meta.authors)),
+        creators: meta.credits.clone(),
         language: meta.language.clone(),
         publisher: meta.publisher.clone(),
         date: stored_date(meta),
@@ -370,7 +371,11 @@ fn stage(
             Err(e) => eprintln!("[sidle/import] {label}: metadata not written into the KFX: {e:#}"),
         }
     }
-    let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
+    let basename = format_basename(
+        &credits::author_names(&meta.credits),
+        &meta.title,
+        meta.date.as_deref(),
+    );
 
     // A KFX pairs with an EPUB, or a PDF when PDF-backed; EPUB and PDF pair with KFX.
     let partner = match canonical {
@@ -618,7 +623,7 @@ pub enum ImportOutcome {
 
 struct BookMeta {
     title: String,
-    authors: Vec<String>,
+    credits: Vec<Credit>,
     language: String,
     ppd: Option<String>,
     date: Option<String>,
@@ -630,7 +635,7 @@ struct BookMeta {
     publisher: Option<String>,
     /// Yomigana for the title (`Metadata.title_sort`), romanized at [`insert_row`].
     title_reading: Option<String>,
-    /// Yomigana for the first author (`Metadata.author_sorts[0]`), for a lone creator.
+    /// Yomigana of the lone author's creator (its sort key), when one author is credited.
     author_reading: Option<String>,
     /// The series the source declares, and its position (`Metadata.collection`).
     series: Option<(String, Option<f64>)>,
@@ -644,10 +649,19 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     } else {
         m.title.clone()
     };
+    let book_credits = credits::from_metadata(m);
+    // The lone author's own creator, when exactly one author is credited.
+    let lone_author = match credits::author_names(&book_credits).as_slice() {
+        [name] => m
+            .creators
+            .iter()
+            .find(|c| credits::normalize_display(&c.name) == *name),
+        _ => None,
+    };
     BookMeta {
         title,
-        // `Surname, Given` flipped and 「、」-packed creators unpacked; see [`authors`].
-        authors: authors::from_metadata(&m.authors),
+        // `Surname, Given` flipped and 「、」-packed creators unpacked; see [`credits`].
+        credits: book_credits,
         // One canonical code per language tag (en-US, eng → en).
         language: super::lang::normalize(&m.language),
         ppd: m.page_progression_direction.clone(),
@@ -661,7 +675,7 @@ fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         // Yomigana bokai pulled from EPUB `opf:file-as` / KFX `*_pronunciation`
         // — romanized at `insert_row` (yomigana-aware when kana).
         title_reading: m.title_sort.clone(),
-        author_reading: m.author_sorts.first().cloned(),
+        author_reading: lone_author.and_then(|c| c.file_as.clone()),
         series: m.collection.as_ref().and_then(|c| {
             let name = c.name.trim();
             (!name.is_empty()).then(|| (name.to_string(), c.position))
@@ -679,13 +693,17 @@ fn extract_meta_from_pdf(doc: &bokai::import::PdfDoc, fallback_stem: Option<&str
         .filter(|t| !t.trim().is_empty())
         .or_else(|| fallback_stem.map(str::to_string))
         .unwrap_or_else(|| "Untitled".to_string());
-    let authors = match doc.author.as_deref() {
-        Some(a) if !a.trim().is_empty() => authors::from_metadata(&[a.to_string()]),
-        _ => Vec::new(),
-    };
+    let book_credits = credits::from_metadata(&bokai::Metadata {
+        creators: doc
+            .author
+            .iter()
+            .map(|a| bokai::Contributor::named(a.as_str()))
+            .collect(),
+        ..Default::default()
+    });
     BookMeta {
         title,
-        authors,
+        credits: book_credits,
         language: "en".to_string(),
         ppd: None,
         date: None,
@@ -743,16 +761,14 @@ fn insert_row(
     let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
     let kfx_path_str = files.kfx_path.map(|p| p.to_string_lossy().to_string());
     let pdf_path_str = files.pdf_path.map(|p| p.to_string_lossy().to_string());
-    // `meta.authors` is canonical; the join takes the display separator (see [`authors`]).
-    let authors_joined = authors::join_display(&meta.authors);
     // Romaji rendered yomigana-aware, the author reading only for a lone author.
     let title_romaji =
         super::romaji::romanize_field(&meta.title, meta.title_reading.as_deref(), &meta.language);
-    let author_reading = (meta.authors.len() == 1)
-        .then_some(meta.author_reading.as_deref())
-        .flatten();
-    let author_romaji =
-        super::romaji::romanize_field(&authors_joined, author_reading, &meta.language);
+    let author_romaji = super::romaji::romanize_field(
+        &credits::author_line(&meta.credits),
+        meta.author_reading.as_deref(),
+        &meta.language,
+    );
     let now = db::now_iso();
     let published_at = stored_date(meta);
     let id = db::insert_book(
@@ -760,7 +776,7 @@ fn insert_row(
         &NewBook {
             sha256: sha,
             title: &meta.title,
-            author: &authors_joined,
+            credits: &meta.credits,
             language: &meta.language,
             title_romaji: &title_romaji,
             author_romaji: &author_romaji,
@@ -983,7 +999,7 @@ pub(crate) mod tests {
         };
         let meta = extract_meta_from_pdf(&doc, Some("fallback"));
         assert_eq!(meta.title, "The Street Was Mine");
-        assert_eq!(meta.authors, vec!["MEGAN E. ABBOTT".to_string()]);
+        assert_eq!(credits::names(&meta.credits), ["MEGAN E. ABBOTT"]);
 
         // No /Info title → file stem.
         let doc2 = bokai::import::PdfDoc {
@@ -1000,14 +1016,14 @@ pub(crate) mod tests {
         };
         let meta2 = extract_meta_from_pdf(&doc2, Some("My File"));
         assert_eq!(meta2.title, "My File");
-        assert!(meta2.authors.is_empty());
+        assert!(meta2.credits.is_empty());
     }
 
     /// A `BookMeta` carrying nothing but the identity fields the re-key reads.
     fn meta_with_asin(asin: Option<&str>) -> BookMeta {
         BookMeta {
             title: "T".to_string(),
-            authors: Vec::new(),
+            credits: Vec::new(),
             language: "en".to_string(),
             ppd: None,
             date: None,

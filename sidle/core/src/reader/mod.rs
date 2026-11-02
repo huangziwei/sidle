@@ -184,7 +184,7 @@ impl ReaderBook {
             images,
             toc: map_toc(package.toc),
             title: metadata.title.clone(),
-            authors: metadata.authors.clone(),
+            authors: metadata.creator_names(),
             language: metadata.language.clone(),
             writing_mode,
             page_progression_direction: metadata

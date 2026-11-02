@@ -381,10 +381,16 @@
               </span>
               <input name="title_romaji" placeholder="searchable romaji — editable" autocomplete="off" />
             </label>
-            <label class="field">
+            <label class="field" id="field-author">
               <span>Authors</span>
               <input name="author" placeholder="Jane Smith & John Doe" autocomplete="off" />
             </label>
+            <div class="field" id="field-credits">
+              <span id="field-credits-label">Credits</span>
+              <div id="credits-rows" class="credits-rows"></div>
+              <button type="button" class="btn-link credits-add" id="credits-add">+ Add a person</button>
+              <small class="field-hint" id="credits-hint" hidden></small>
+            </div>
             <label class="field" id="field-author-romaji">
               <span>Author romaji
                 <button type="button" class="btn-link romaji-regen" data-romaji-for="author"
@@ -910,8 +916,8 @@
       </div>
     </div>
 
-    <!-- Book editor — full-screen, parallel to #reader-view. Calibre "Edit
-         book" analog; KFX-source in v1. Driven by editor.js (window.sidleEditor). -->
+    <!-- Book editor — full-screen, parallel to #reader-view, driven by editor.js
+         (window.sidleEditor). -->
     <div id="editor-view" class="editor-view" hidden>
       <header class="editor-topbar">
         <button id="editor-close" class="reader-btn" title="Close (Esc)" aria-label="Close editor">←</button>

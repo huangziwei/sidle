@@ -152,11 +152,90 @@ function facetOptionLabel(facet, value) {
   return facet === "language" ? languageName(value) : value;
 }
 
+// The MARC relator codes the credits editor offers, in menu order.
+const CREDIT_ROLES = [
+  ["aut", "Author"],
+  ["ill", "Illustrator"],
+  ["edt", "Editor"],
+  ["trl", "Translator"],
+  ["ant", "Original work"],
+  ["art", "Artist"],
+  ["cov", "Cover designer"],
+  ["pht", "Photographer"],
+  ["com", "Compiler"],
+  ["aui", "Introduction"],
+  ["aft", "Afterword"],
+  ["ctb", "Contributor"],
+];
+
+// Labels for the menu's codes and for others books state.
+const ROLE_LABELS = Object.fromEntries([
+  ...CREDIT_ROLES,
+  ["adp", "Adapter"],
+  ["ann", "Annotator"],
+  ["bkp", "Book producer"],
+  ["csl", "Consultant"],
+  ["dto", "Dedicator"],
+  ["edc", "Editor of compilation"],
+  ["nrt", "Narrator"],
+  ["trc", "Transcriber"],
+  ["win", "Writer of introduction"],
+  ["wpr", "Writer of preface"],
+]);
+
+function roleLabel(code) {
+  return ROLE_LABELS[code] || code;
+}
+
+// A credit stating no role counts as an author.
+function isAuthorCredit(c) {
+  return !c.roles?.length || c.roles.some((r) => r.toLowerCase() === "aut");
+}
+
+// Names joined as the library joins an author line: 「、」 when every name is CJK.
+const CJK_NAME = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\uac00-\ud7af]/;
+function joinNames(names) {
+  return names.length > 1 && names.every((n) => CJK_NAME.test(n))
+    ? names.join("、")
+    : names.join(" & ");
+}
+
+// What the Author column shows: the author line, else the other credits grouped by
+// role ("A、B (Editor)").
+function bylineOf(b) {
+  if (b.author) return b.author;
+  const groups = new Map();
+  for (const c of b.credits || []) {
+    const label = roleLabel(c.roles?.[0] || "aut");
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(c.name);
+  }
+  return [...groups].map(([label, names]) => `${joinNames(names)} (${label})`).join("; ");
+}
+
+// Every credit with its roles, one per line.
+function creditsText(b) {
+  return (b.credits || [])
+    .map((c) => `${c.name} — ${(c.roles?.length ? c.roles : ["aut"]).map(roleLabel).join(", ")}`)
+    .join("\n");
+}
+
+// The Author cell: the byline, with every credit in its tooltip once someone is
+// credited in another role; muted when no author is credited.
+function authorCell(b) {
+  if (!(b.credits || []).some((c) => !isAuthorCredit(c))) return b.author || "";
+  const span = document.createElement("span");
+  span.textContent = bylineOf(b);
+  span.title = creditsText(b);
+  if (!b.author) span.className = "byline-credits";
+  return span;
+}
+
 // The Books list-view column schema, rendered by the shared `TableView`.
 const textEdit = (get) => ({ type: "text", get });
 const BOOK_COLUMNS = [
   { key: "title",        label: "Title",      sortable: true,  render: (b) => b.title || "Untitled",    edit: textEdit((b) => b.title || "") },
-  { key: "author",       label: "Author",     sortable: true,  render: (b) => b.author || "",           edit: textEdit((b) => b.author || "") },
+  { key: "author",       label: "Author",     sortable: true,  render: (b) => authorCell(b),            edit: textEdit((b) => b.author || "") },
   { key: "series",       label: "Series",     sortable: true,  render: (b) => seriesText(b),            edit: textEdit((b) => seriesText(b)) },
   { key: "publisher",    label: "Publisher",  sortable: true,  render: (b) => b.publisher || "",        edit: textEdit((b) => b.publisher || "") },
   { key: "published_at", label: "Published",  sortable: true,  render: (b) => b.published_at || "",     edit: textEdit((b) => b.published_at || "") },
@@ -989,6 +1068,7 @@ function sortedBooks(books) {
 function sortValue(b, key) {
   if (key === "on_kindle") return state.sentSet.has(b.sha256) ? 1 : 0;
   if (key === "series") return seriesSortKey(b);
+  if (key === "author") return bylineOf(b);
   return b[key];
 }
 
@@ -1201,6 +1281,7 @@ function matchesSearch(book, terms) {
     book.title_romaji,
     book.author_romaji,
     ...(book.tags || []),
+    ...(book.credits || []).map((c) => c.name),
   ]
     .filter(Boolean)
     .join(" ")
@@ -1455,7 +1536,7 @@ function galleryCard(b) {
   card.className = "book-card";
   if (booksSelection.has(b.id)) card.classList.add("selected");
   card.dataset.bookId = b.id;
-  card.title = `${b.title}\n${b.author}`;
+  card.title = `${b.title}\n${bylineOf(b)}`;
 
   const coverUrl = coverUrlFor(b, { thumb: true });
   const cover = document.createElement("div");
@@ -1483,7 +1564,7 @@ function galleryCard(b) {
   t.textContent = b.title || "Untitled";
   const a = document.createElement("div");
   a.className = "a";
-  a.textContent = b.author || "Unknown author";
+  a.textContent = bylineOf(b) || "Unknown author";
   meta.append(t, a, metaBadges(b));
   card.appendChild(meta);
 
@@ -1765,7 +1846,7 @@ async function sendBooks(bookIds) {
     return {
       id,
       title: b?.title || "Untitled",
-      author: b?.author || "",
+      author: b ? bylineOf(b) : "",
       status: "queued",
       done: 0,
       total: 0,
@@ -1872,8 +1953,7 @@ function updateDeviceUI(info) {
       info.free_bytes != null && info.total_bytes != null
         ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
         : "—";
-    // MTP devices need exclusive USB session access, and any other app talking to the
-    // Kindle (Image Capture, OpenMTP, Calibre) holds it.
+    // `info.transport` `mtp` needs exclusive USB access, which another app may hold.
     if (info.transport === "mtp") {
       tip.textContent =
         "MTP device. Quit Image Capture, OpenMTP, or Calibre if a push fails — only one app can hold the USB session at a time.";
@@ -2626,7 +2706,7 @@ function queueRow(b) {
 
   const meta = document.createElement("div");
   meta.className = "queue-meta";
-  meta.textContent = b.author || "";
+  meta.textContent = bylineOf(b);
 
   const bar = document.createElement("div");
   bar.className = `queue-progress ${b.status}`;
@@ -2946,7 +3026,7 @@ async function doExport(books, fmt) {
     showToast(`export failed: ${e}`, true);
     return;
   }
-  if (!dir) return; // user cancelled the folder picker
+  if (!dir) return; // folder picker cancelled
 
   let summary;
   try {
@@ -3509,8 +3589,8 @@ async function openInFinder(bookId) {
 
 // Sequence number guarding `openReader` against a stale reply.
 let openReqSeq = 0;
-// Open the Calibre-style book editor (window.sidleEditor) for KFX- and EPUB-source
-// books. The caller gates the menu item, and this is reached for those alone.
+// Open the book editor (window.sidleEditor) on `b`; the caller gates which books
+// reach it.
 function openEditor(b) {
   if (!window.sidleEditor) {
     showToast("editor not ready", true);
@@ -4106,10 +4186,15 @@ function wireMetadataModal() {
   });
   $("#metadata-cover-change").addEventListener("click", onCoverChangeClick);
   $("#metadata-cover-refetch").addEventListener("click", onCoverRefetchClick);
+  $("#credits-add").addEventListener("click", () => {
+    const row = creditRow("", metadataBulk ? "ill" : "aut");
+    $("#credits-rows").appendChild(row);
+    row.querySelector(".credit-name").focus();
+  });
   $("#asin-search").addEventListener("click", onAsinSearchClick);
   $("#metadata-form").amazon_asin.addEventListener("input", renderAsinHint);
-  // "↻" regenerate buttons: re-render a romaji field from its source (title /
-  // author) via the engine. The user reviews/corrects before saving.
+  // "↻" regenerate buttons: re-render a romaji field from its source (title / author)
+  // via the engine.
   for (const btn of $("#metadata-form").querySelectorAll(".romaji-regen")) {
     btn.addEventListener("click", onRomajiRegen);
   }
@@ -4183,6 +4268,7 @@ function openMetadataModal(arg, opts = {}) {
     form.content_id.value = "";
     form.title_romaji.disabled = true;
     form.author_romaji.disabled = true;
+    renderCreditRows([], { bulk: true });
 
     $("#metadata-modal").hidden = false;
     setTimeout(() => form.author.focus(), 0);
@@ -4205,6 +4291,7 @@ function openMetadataModal(arg, opts = {}) {
 
   form.title.value = book.title || "";
   form.author.value = book.author || "";
+  renderCreditRows(book.credits || [], { bulk: false });
   form.title_romaji.value = book.title_romaji || "";
   form.author_romaji.value = book.author_romaji || "";
   form.language.value = book.language || "";
@@ -4218,9 +4305,8 @@ function openMetadataModal(arg, opts = {}) {
       : "";
   // Tags display comma-joined; the backend canonicalizes them on save.
   form.tags.value = (book.tags || []).join(", ");
-  // Two identifiers, and only one of them is the user's. `amazon_asin` names an
-  // item in Amazon's catalogue and does nothing but fetch the color cover;
-  // `asin` is what the file itself carries, which the device keys everything on.
+  // Two identifiers: `amazon_asin` names an item in Amazon's catalogue and only fetches
+  // the color cover; `asin` is what the file carries, the device's key for everything.
   form.amazon_asin.value = book.amazon_asin || "";
   form.content_id.value = book.asin || "";
   renderAsinHint();
@@ -4230,6 +4316,74 @@ function openMetadataModal(arg, opts = {}) {
   $("#metadata-modal").hidden = false;
   // Focus the title input for keyboard-first flow.
   setTimeout(() => form.title.focus(), 0);
+}
+
+// Fill the credits editor: one row per credit and role, a credit stating none shown
+// as the author it counts as. Bulk mode starts from one blank row, each row there
+// giving a person a role across the selection.
+function renderCreditRows(credits, { bulk }) {
+  const box = $("#credits-rows");
+  box.innerHTML = "";
+  const rows = credits.flatMap((c) =>
+    (c.roles?.length ? c.roles : ["aut"]).map((role) => ({ name: c.name, role })),
+  );
+  if (bulk || rows.length === 0) rows.push({ name: "", role: bulk ? "ill" : "aut" });
+  for (const r of rows) box.appendChild(creditRow(r.name, r.role));
+  $("#field-credits-label").textContent = bulk ? "Give a role" : "Credits";
+  const hint = $("#credits-hint");
+  hint.hidden = !bulk;
+  hint.textContent = bulk
+    ? "Each row gives that person the role in every selected book, crediting them where they are not."
+    : "";
+}
+
+// One editor row: the name, its role, and a remove button.
+function creditRow(name, role) {
+  const row = document.createElement("div");
+  row.className = "credit-row";
+  const input = document.createElement("input");
+  input.className = "credit-name";
+  input.placeholder = "Name";
+  input.autocomplete = "off";
+  input.value = name;
+  const select = document.createElement("select");
+  select.className = "credit-role";
+  const known = CREDIT_ROLES.some(([code]) => code === role);
+  for (const [code, label] of known ? CREDIT_ROLES : [...CREDIT_ROLES, [role, roleLabel(role)]]) {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = label;
+    select.appendChild(opt);
+  }
+  select.value = role;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "credit-remove";
+  remove.title = "Remove";
+  remove.textContent = "×";
+  remove.addEventListener("click", () => row.remove());
+  row.append(input, select, remove);
+  return row;
+}
+
+// The credits the editor rows state: one per name in the order names first
+// appear, with the roles of every row naming it. A row without a name is skipped.
+function creditsFromRows() {
+  const out = [];
+  for (const row of $("#credits-rows").querySelectorAll(".credit-row")) {
+    const name = row.querySelector(".credit-name").value.trim();
+    const role = row.querySelector(".credit-role").value;
+    if (!name) continue;
+    const kept = out.find((c) => c.name === name);
+    if (!kept) out.push({ name, roles: [role] });
+    else if (!kept.roles.includes(role)) kept.roles.push(role);
+  }
+  return out;
+}
+
+// The author line the editor rows state.
+function authorLineFromRows() {
+  return joinNames(creditsFromRows().filter(isAuthorCredit).map((c) => c.name));
 }
 
 function closeMetadataModal() {
@@ -4287,15 +4441,16 @@ function renderCoverPreview(book) {
   }
 }
 
-// Regenerate a romaji field from its source field (title / author) via the
-// `library_romanize` command. Engine-only — the user reviews and corrects the
-// result before saving. Bound to the "↻" buttons in the metadata modal.
+// Regenerate a romaji field from its source field (title / author) via
+// `library_romanize`, bound to the "↻" buttons in the metadata modal.
 async function onRomajiRegen(e) {
   const form = $("#metadata-form");
   const which = e.currentTarget.dataset.romajiFor; // "title" | "author"
   const target = form[`${which}_romaji`];
   if (!target) return;
-  const source = (form[which]?.value || "").trim();
+  // One book's author line is the one its credit rows state.
+  const source =
+    which === "author" ? authorLineFromRows() : (form[which]?.value || "").trim();
   try {
     target.value = await window.api.invoke("library_romanize", {
       text: source,
@@ -4311,9 +4466,16 @@ async function submitMetadataForm() {
   if (!metadataBook) return;
   const form = $("#metadata-form");
   const tagsRaw = form.tags.value.trim();
+  const authorLine = authorLineFromRows();
+  // An author romaji left as it was re-renders when the author line it spelled changes.
+  const authorRomaji = form.author_romaji.value.trim();
+  const staleRomaji =
+    authorLine !== (metadataBook.author || "") &&
+    authorRomaji === (metadataBook.author_romaji || "").trim();
   const patch = {
     title: form.title.value.trim(),
-    author: form.author.value.trim(),
+    author: authorLine,
+    credits: creditsFromRows(),
     language: form.language.value.trim(),
     // Reading layout drives the writing-mode axis and `ppd`.
     writing_mode: form.reading_layout.value || null,
@@ -4341,7 +4503,7 @@ async function submitMetadataForm() {
     // Editable search romaji. A blank field self-heals on the backend, re-rendered from
     // title and author, and clearing it regenerates.
     title_romaji: form.title_romaji.value.trim(),
-    author_romaji: form.author_romaji.value.trim(),
+    author_romaji: staleRomaji ? "" : authorRomaji,
   };
 
   if (!patch.title) {
@@ -4432,6 +4594,7 @@ async function submitBulkMetadataForm() {
   patch.add_tags =
     tagsRaw === "" ? [] : tagsRaw.split(/[,、]/).map((s) => s.trim()).filter(Boolean);
   patch.remove_tags = []; // add-only
+  patch.credits = creditsFromRows();
 
   const hasScalar = [
     "author",
@@ -4443,7 +4606,7 @@ async function submitBulkMetadataForm() {
     "series_name",
     "series_index",
   ].some((k) => k in patch);
-  if (!hasScalar && patch.add_tags.length === 0) {
+  if (!hasScalar && patch.add_tags.length === 0 && patch.credits.length === 0) {
     showToast("Nothing to apply — fill at least one field.");
     return;
   }
@@ -4476,7 +4639,7 @@ async function onCoverChangeClick() {
     showToast(`Image picker failed: ${e}`, true);
     return;
   }
-  if (!src) return; // user cancelled
+  if (!src) return; // cancelled
   await applyCoverFromPath(src);
 }
 
@@ -4615,9 +4778,8 @@ async function openSplitModal(book) {
   setTimeout(() => $("#split-series").focus(), 0);
 }
 
-// One row per proposed volume: keep it or not, its number, its title, and how
-// many of the collection's pages it spans (which the user can't change — the
-// spans tile the book by construction).
+// One row per proposed volume: keep it or not, its number, its title, and the fixed
+// count of the collection's pages it spans.
 function renderSplitRows(volumes) {
   const tbody = $("#split-rows");
   tbody.innerHTML = "";

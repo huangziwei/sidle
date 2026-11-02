@@ -82,12 +82,15 @@ pub struct EditorToc {
     pub flattened_entries: usize,
 }
 
-/// Current metadata for the metadata panel. `author` is the display string
-/// (`"Jane Smith & John Doe"`), parsed back into an ordered list on save.
+/// Current metadata for the metadata panel. `author` is the author line
+/// (`"Jane Smith & John Doe"`); a save replaces the authors with its names and
+/// keeps every other credit.
 #[derive(Serialize)]
 pub struct EditorMetadata {
     pub title: String,
     pub author: String,
+    /// Every credit with its roles; the panel lists those beside the authors.
+    pub credits: Vec<crate::library::credits::Credit>,
     pub language: String,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
@@ -147,6 +150,7 @@ pub async fn editor_open(state: State<'_, AppState>, book_id: i64) -> Result<Edi
         metadata: EditorMetadata {
             title: row.title.clone(),
             author: row.author.clone(),
+            credits: row.credits.clone(),
             language: row.language.clone(),
             publisher: row.publisher.clone(),
             published_at: row.published_at.clone(),
@@ -198,6 +202,7 @@ pub async fn editor_save_metadata(
     let patch = db::MetadataPatch {
         title: form.title,
         author: form.author,
+        credits: None,
         language: form.language,
         ppd: row.ppd.clone(),
         writing_mode: row.writing_mode.clone(),

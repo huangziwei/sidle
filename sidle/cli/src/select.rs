@@ -25,6 +25,9 @@ pub struct Select {
     /// Substring of the author (case-insensitive).
     #[arg(long = "author-like", value_name = "TEXT")]
     pub author_like: Option<String>,
+    /// Substring of any credited name, whatever its role (case-insensitive).
+    #[arg(long = "credited-like", value_name = "TEXT")]
+    pub credited_like: Option<String>,
     /// Series name (exact).
     #[arg(long, value_name = "NAME")]
     pub series: Option<String>,
@@ -68,6 +71,7 @@ impl Select {
             && self.asins.is_empty()
             && self.title_like.is_none()
             && self.author_like.is_none()
+            && self.credited_like.is_none()
             && self.series.is_none()
             && self.tags.is_empty()
             && self.lang.is_none()
@@ -83,7 +87,7 @@ impl Select {
         if self.is_unset() {
             anyhow::bail!(
                 "no books selected — pass --all for the whole library, or narrow with \
-                 --id/--sha/--asin/--title-like/--author-like/--series/--tag/--lang/\
+                 --id/--sha/--asin/--title-like/--author-like/--credited-like/--series/--tag/--lang/\
                  --status/--kind/--has/--missing"
             );
         }
@@ -96,6 +100,7 @@ impl Select {
         let lower = |s: &Option<String>| s.as_ref().map(|v| v.to_lowercase());
         let title = lower(&self.title_like);
         let author = lower(&self.author_like);
+        let credited = lower(&self.credited_like);
 
         let mut out: Vec<BookRow> = db::list_books(conn)?
             .into_iter()
@@ -116,6 +121,10 @@ impl Select {
             })
             .filter(|b| match &author {
                 Some(a) => b.author.to_lowercase().contains(a),
+                None => true,
+            })
+            .filter(|b| match &credited {
+                Some(c) => b.credits.iter().any(|x| x.name.to_lowercase().contains(c)),
                 None => true,
             })
             .filter(|b| match &self.series {
@@ -200,7 +209,7 @@ mod tests {
                 &NewBook {
                     sha256: sha,
                     title,
-                    author,
+                    credits: &sidle_core::library::credits::from_author_line(author),
                     language: lang,
                     ppd: None,
                     epub_path: None,
@@ -290,6 +299,46 @@ mod tests {
             titles(&by_author, &conn),
             vec!["Shift".to_string(), "Wool".to_string()],
             "the author match is case-insensitive and needs no other flag"
+        );
+    }
+
+    #[test]
+    fn credited_like_finds_a_name_in_any_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = library(tmp.path());
+        let shift = titles(
+            &Select {
+                title_like: Some("shift".into()),
+                ..Default::default()
+            },
+            &conn,
+        );
+        assert_eq!(shift, ["Shift"]);
+        let id = db::list_books(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.title == "Shift")
+            .unwrap()
+            .id;
+        let mut credits = db::get_book(&conn, id).unwrap().unwrap().credits;
+        credits.push(sidle_core::library::credits::Credit::with_roles(
+            "Ivy Drawer",
+            &["ill"],
+        ));
+        db::set_credits(&conn, id, &credits).unwrap();
+
+        let by_credit = Select {
+            credited_like: Some("ivy".into()),
+            ..Default::default()
+        };
+        assert_eq!(titles(&by_credit, &conn), ["Shift"]);
+        let by_author = Select {
+            author_like: Some("ivy".into()),
+            ..Default::default()
+        };
+        assert!(
+            titles(&by_author, &conn).is_empty(),
+            "an illustrator is not an author"
         );
     }
 

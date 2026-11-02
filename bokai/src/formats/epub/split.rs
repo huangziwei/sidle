@@ -28,13 +28,9 @@ pub struct Cut {
     pub documents: usize,
     /// What the collection's own navigation calls this volume.
     pub label: String,
-    /// The volume's own cover page, as an absolute zip path — the document the
-    /// cut lands on, when that document opens on a full-bleed plate. `None` for
-    /// a volume that opens on text.
+    /// The cut's document as an absolute zip path when it opens on a full-bleed plate.
     pub cover: Option<String>,
-    /// The volume's number within the collection. Fractional because publishers
-    /// number that way: a 5.5 shipped between volumes 5 and 6 is a real volume
-    /// with a real place, not volume 6 under another name.
+    /// The volume's number within the collection; fractional for a 5.5 between 5 and 6.
     pub number: f64,
     /// Where [`Cut::number`] came from.
     pub numbering: Numbering,
@@ -45,14 +41,12 @@ pub struct Cut {
 pub enum Numbering {
     /// The volume's own label states it.
     Label,
-    /// The label states none, so the volume takes the number after its
-    /// predecessor's.
+    /// The label states none: the number after its predecessor's.
     Sequence,
 }
 
-/// Propose where to cut a collection into volumes, in reading order. Empty for a
-/// book that evidences no volumes — which is every ordinary book, and the answer
-/// this returns for one.
+/// Propose where to cut a collection into volumes, in reading order; empty for a book
+/// that evidences none.
 pub fn propose_cuts(epub_bytes: &[u8]) -> io::Result<Vec<Cut>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -122,7 +116,7 @@ fn volume(
             || kept.contains(name)
             || resources.contains(name)
     });
-    // A cross-volume link would dangle, so it keeps its text and loses its href.
+    // A cross-volume link keeps its text and loses its href.
     for doc in &documents {
         if let Some(bytes) = volume.get(doc)
             && let Some(rewritten) = unlink_outside(bytes, &dir_of(doc), &kept)
@@ -147,8 +141,7 @@ fn volume(
         .into_bytes(),
     );
 
-    // The volume is a complete book by this point, so its chapter list is read
-    // the same way any book's is.
+    // The volume, a complete book by this point, has its chapter list read like any book's.
     let entries = volume_toc(&volume, opf_path, carve(toc, &kept));
     volume.set(
         &nav_path,
@@ -183,9 +176,7 @@ fn volume_toc(volume: &EpubPackage, opf_path: &str, carved: Vec<TocEntry>) -> Ve
         return carved;
     };
     let opf_base = dir_of(opf_path);
-    // Reads only the volume's own pages: the nav doc and NCX its package
-    // declares are the ones about to be written from this, and are not there
-    // yet.
+    // Reads only the volume's own pages: its declared nav doc and NCX are written from this.
     let derived = toc_repair::propose_from_pkg(volume, &opf, &opf_base, &opf_str);
     if derived.is_empty() {
         return carved;
@@ -201,7 +192,7 @@ fn volume_toc(volume: &EpubPackage, opf_path: &str, carved: Vec<TocEntry>) -> Ve
     })
 }
 
-/// A zip path under `dir` that `taken` does not already claim.
+/// A zip path under `dir` that `taken` does not claim.
 fn free_path(taken: &impl Fn(&str) -> bool, dir: &str, preferred: &str) -> String {
     let candidate = format!("{dir}{preferred}");
     if !taken(&candidate) {
@@ -300,9 +291,8 @@ fn references(text: &str) -> Vec<String> {
     out
 }
 
-/// Strip the `href` from links that leave this volume, keeping the `<a>` and
-/// its text. `None` when the document has none — the common case, and the one
-/// where its bytes stay exactly as the collection shipped them.
+/// Strip the `href` from links that leave this volume, keeping the `<a>` and its text;
+/// `None` when the document has none, its bytes staying as shipped.
 fn unlink_outside(content: &[u8], doc_dir: &str, kept: &HashSet<&str>) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(content).ok()?;
     let mut out = String::with_capacity(text.len());
@@ -315,8 +305,8 @@ fn unlink_outside(content: &[u8], doc_dir: &str, kept: &HashSet<&str>) -> Option
         let href = &value[..end];
         let resolved = resolve_href(doc_dir, href);
         let target = strip_fragment(&resolved);
-        // A pure `#fragment` stays inside the document; anything the volume does
-        // not hold, and that is a document rather than a resource, has to go.
+        // A pure `#fragment` stays inside the document; a link to a document the volume does
+        // not hold goes.
         let leaves = !href.starts_with('#')
             && !href.contains(':')
             && !target.is_empty()
@@ -337,9 +327,7 @@ fn unlink_outside(content: &[u8], doc_dir: &str, kept: &HashSet<&str>) -> Option
     Some(out.into_bytes())
 }
 
-/// The image a volume's cover page shows, as an absolute zip path. A page that
-/// runs the cover together with a frontispiece or a title plate shows the cover
-/// first, so the first image is the one that stands for the volume.
+/// The image a volume's cover page shows first, as an absolute zip path.
 fn cover_image(pkg: &EpubPackage, cut: &Cut) -> Option<String> {
     let page = cut.cover.as_deref()?;
     let bytes = pkg.get(page)?;
@@ -378,11 +366,24 @@ fn volume_opf(
          <dc:language>{lang}</dc:language>\n",
         escape_text(&cut.label)
     );
-    for author in &meta.authors {
+    for (i, creator) in meta.creators.iter().enumerate() {
+        let id = format!("creator{}", i + 1);
         metadata.push_str(&format!(
-            "<dc:creator>{}</dc:creator>\n",
-            escape_text(author)
+            "<dc:creator id=\"{id}\">{}</dc:creator>\n",
+            escape_text(&creator.name)
         ));
+        for role in &creator.roles {
+            metadata.push_str(&format!(
+                "<meta refines=\"#{id}\" property=\"role\" scheme=\"marc:relators\">{}</meta>\n",
+                escape_text(role)
+            ));
+        }
+        if let Some(key) = &creator.file_as {
+            metadata.push_str(&format!(
+                "<meta refines=\"#{id}\" property=\"file-as\">{}</meta>\n",
+                escape_text(key)
+            ));
+        }
     }
     if let Some(publisher) = &meta.publisher {
         metadata.push_str(&format!(
@@ -413,9 +414,8 @@ fn volume_opf(
         ));
     }
 
-    // The manifest names the nav doc, the NCX, the volume's documents and the
-    // resources they reach — nothing else, so no manifest entry points at a
-    // file the volume does not carry.
+    // The manifest names the nav doc, the NCX, the volume's documents and the resources
+    // they reach, and nothing else.
     let mut manifest = format!(
         "<item id=\"nav\" href=\"{}\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n\
          <item id=\"ncx\" href=\"{}\" media-type=\"application/x-dtbncx+xml\"/>\n",
@@ -457,7 +457,7 @@ fn volume_opf(
     )
 }
 
-/// A volume number as a series position: `3` rather than `3`, `5.5` intact.
+/// A volume number as a series position: `3` for 3.0, `5.5` intact.
 fn trim_number(n: f64) -> String {
     if n.fract() == 0.0 {
         format!("{n:.0}")
@@ -520,7 +520,7 @@ fn cuts(pkg: &EpubPackage, opf: &OpfData, opf_base: &str, toc: &[TocEntry]) -> V
         &candidates,
         toc,
         &opf.metadata.title,
-        &opf.metadata.authors,
+        &opf.metadata.creator_names(),
     );
     if starts.len() < 2 {
         // One volume is not a collection, and neither is none.
@@ -563,7 +563,7 @@ fn volume_first_documents(
         // collection's whatever shape it has.
         let floor = fronted.last().map_or(1, |&previous| previous + 1);
         let mut first = i;
-        // Only a volume named by something other than a plate can be missing
+        // A start that is not a cover page takes the plates-only pages before it.
         if cover_page(pkg, &spine[i].0).is_none() {
             while first > floor && plates_only(pkg, &spine[first - 1].0) {
                 first -= 1;
@@ -595,8 +595,8 @@ fn span(
     from..to
 }
 
-/// The top-level chapter-list entries that open a spine document, one per
-/// document, **in reading order**. Never the book's own first document:
+/// The top-level chapter-list entries that open a spine document, one per document,
+/// **in reading order**, never the book's own first document.
 fn candidates<'a>(toc: &'a [TocEntry], spine: &[(String, String)]) -> Vec<Candidate<'a>> {
     let mut out: Vec<Candidate<'a>> = Vec::new();
     for entry in toc {
@@ -683,8 +683,7 @@ fn named_as_a_series(
     title: &str,
     authors: &[String],
 ) -> Vec<Start> {
-    // A count of two is the commonest shape in publishing, so it takes three to read
-    // as a series. A repeated work name needs no such margin.
+    // `counted_labels` needs three volumes to read as a series, `title_bearing_labels` two.
     for (chosen, least) in [
         (counted_labels(candidates), 3),
         (title_bearing_labels(candidates, title, authors), 2),
@@ -774,9 +773,8 @@ const VOLUME_WORDS: [&str; 3] = ["book", "volume", "vol"];
 /// What a label reads as a counted volume: the stem it counts from, and the
 /// number. `None` unless the stem says it is counting volumes.
 fn counted_volume(label: &str) -> Option<(&str, f64)> {
-    // A CJK counter construction names its own counter, and `counted_number`
-    // already holds it to one that counts volumes. Every such label shares a
-    // stem by construction — they are all `第…`.
+    // A CJK counter construction names its own counter, which `counted_number` holds to a
+    // volume counter; every such label shares the stem `第`.
     if let Some(number) = counted_number(label) {
         return Some(("第", number));
     }
@@ -812,7 +810,7 @@ fn title_bearing_labels(
             .filter(|c| c.label.starts_with(stem))
             .count()
     };
-    // The stem that names the most entries, not the longest one. A collection's
+    // The stem that names the most entries, not the longest one.
     let Some(stem) = candidates
         .iter()
         .filter_map(|c| title_borne_prefix(c.label, title))
@@ -829,15 +827,15 @@ fn title_bearing_labels(
         .collect()
 }
 
-/// Whether a stem is the author's name rather than the work's. A book titled
+/// Whether `stem` begins one of the `authors`.
 fn names_the_author(stem: &str, authors: &[String]) -> bool {
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let stem = squash(stem);
     authors.iter().any(|a| squash(a).starts_with(&stem))
 }
 
-/// Whether `stem` picks out entries a reader could tell apart: at least two of
-/// them, each saying something of its own after it.
+/// Whether `stem` picks out at least two entries, each saying something of its own
+/// after it.
 fn tells_volumes_apart(candidates: &[Candidate<'_>], stem: &str) -> bool {
     let mut rest: Vec<&str> = candidates
         .iter()
@@ -1008,8 +1006,7 @@ fn number_after(
     let previous = previous.map(|c| c.number);
     match stated.or_else(|| volume_number(label)) {
         Some(n) if previous.is_none_or(|p| n > p) => (n, Numbering::Label),
-        // Counting on from the volume before rather than from the position, so
-        // a collection that starts at volume ten keeps counting from ten.
+        // Counting on from the volume before: a collection starting at volume ten counts from ten.
         _ => (
             previous.map_or(index as f64 + 1.0, |p| p + 1.0),
             Numbering::Sequence,
@@ -1022,9 +1019,8 @@ fn volume_number(label: &str) -> Option<f64> {
     counted_number(label).or_else(|| trailing_number(label))
 }
 
-/// The counters a publisher numbers volumes with, in both the Japanese and the
-/// Chinese spelling. 章 and 話 are deliberately absent: they count chapters and
-/// episodes, which are what a volume *contains*.
+/// The counters a publisher numbers volumes with, in Japanese and Chinese spelling;
+/// chapter and episode counters are not among them.
 const VOLUME_COUNTERS: [char; 6] = ['巻', '卷', '部', '冊', '册', '集'];
 
 /// `第` + numerals + a volume counter, as in 第一部 / 第二十七部 / 第３巻.
@@ -1336,8 +1332,8 @@ mod tests {
     #[test]
     fn a_chapter_list_out_of_order_is_read_in_the_books_order() {
         let docs = collection_documents();
-        // Volume 3 declared before volume 1, each with a child so the declared
-        // nesting survives into the proposal untouched.
+        // Volume 3 declared before volume 1, each with a child, the declared nesting kept in
+        // the proposal.
         let rows = concat!(
             r#"<li><a href="cover.xhtml">表紙</a></li>"#,
             r#"<li><a href="toc.xhtml">目次</a><ol><li><a href="colophon.xhtml">奥付</a></li></ol></li>"#,
@@ -1386,9 +1382,8 @@ mod tests {
         assert!(propose_cuts(&epub(&docs)).expect("propose").is_empty());
     }
 
-    /// Volumes that open with a Contents page instead of a cover — nothing in
-    /// the book is a full-bleed image, so the weaker signal is all there is.
-    /// The collection's own Contents page must not become a volume.
+    /// Volumes opening with a Contents page and no full-bleed image anywhere; the
+    /// collection's own Contents page stays out of the cuts.
     #[test]
     fn a_collection_with_no_covers_cuts_at_the_contents_pages_instead() {
         let mut docs: Vec<Doc<'static>> = vec![(
@@ -1567,7 +1562,7 @@ mod tests {
         assert_eq!(volume_number("議事録１"), Some(1.0));
         assert_eq!(volume_number("物語 3巻"), Some(3.0));
 
-        // Numerals that name rather than number.
+        // Numerals that name, not number.
         assert_eq!(volume_number("八つ墓の村"), None);
         assert_eq!(volume_number("三つ首の塔"), None);
         assert_eq!(volume_number("物語　外伝１　副題つきの一編"), None);
@@ -1604,9 +1599,8 @@ mod tests {
         );
     }
 
-    /// A number the detection already read off the label is the label stating
-    /// it, and is held to the same rule: believed where it climbs, dropped
-    /// where it does not.
+    /// A number the detection read off the label counts as the label's own: believed where
+    /// it climbs, dropped where it does not.
     #[test]
     fn a_number_read_while_finding_the_volume_counts_as_the_label_stating_it() {
         let previous = Cut {
@@ -1646,9 +1640,8 @@ mod tests {
         assert_eq!(counted_volume("About the Author"), None);
     }
 
-    /// A stem is the work's name only if the book calls itself that. Every
-    /// volume of a collection carries a 目次, so twelve labels reading exactly
-    /// `目次` share a stem perfectly — and none of them is a volume.
+    /// A stem is the work's name only if the book calls itself that: twelve labels reading
+    /// `目次` share one, and none is a volume.
     #[test]
     fn a_stem_names_the_work_only_where_the_books_own_title_carries_it() {
         let title = "【合本版】異世界の物語　全12巻 (文庫)";
@@ -1657,7 +1650,7 @@ mod tests {
             Some("異世界の物語　")
         );
         assert_eq!(title_borne_prefix("目次", title), None);
-        // Too short to be a name: the title contains it, but so would anything.
+        // Too short to be a name, though the title contains it.
         assert_eq!(title_borne_prefix("全1巻のこと", title), None);
     }
 }

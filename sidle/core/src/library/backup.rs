@@ -644,7 +644,7 @@ mod tests {
                 &db::NewBook {
                     sha256: sha,
                     title,
-                    author: "Author",
+                    credits: &crate::library::credits::from_author_line("Author"),
                     language: "en",
                     ppd: None,
                     epub_path: Some(&epub_s),
@@ -864,7 +864,7 @@ mod tests {
                 &db::NewBook {
                     sha256: "zzz",
                     title: "Old",
-                    author: "",
+                    credits: &[],
                     language: "",
                     ppd: None,
                     epub_path: Some(&epub_s),

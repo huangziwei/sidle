@@ -30,7 +30,7 @@ fn kfx_zip_with_single_container_matches_plain_kfx() {
 
     let plain = Book::open(kfx_path).expect("open .kfx");
     let plain_title = plain.metadata().title.clone();
-    let plain_authors = plain.metadata().authors.clone();
+    let plain_authors = plain.metadata().creators.clone();
     let plain_spine_len = plain.spine().len();
     let plain_toc_len = plain.toc().len();
 
@@ -39,7 +39,7 @@ fn kfx_zip_with_single_container_matches_plain_kfx() {
     let bundled = Book::open(&zip_path).expect("open .kfx-zip");
 
     assert_eq!(bundled.metadata().title, plain_title);
-    assert_eq!(bundled.metadata().authors, plain_authors);
+    assert_eq!(bundled.metadata().creators, plain_authors);
     assert_eq!(bundled.spine().len(), plain_spine_len);
     assert_eq!(bundled.toc().len(), plain_toc_len);
 }
@@ -81,7 +81,7 @@ fn real_kfx_zip_fixture_matches_plain_kfx() {
     let bundled = Book::open(zip).expect("open .kfx-zip");
 
     assert_eq!(bundled.metadata().title, plain.metadata().title);
-    assert_eq!(bundled.metadata().authors, plain.metadata().authors);
+    assert_eq!(bundled.metadata().creators, plain.metadata().creators);
     assert_eq!(bundled.spine().len(), plain.spine().len());
     assert_eq!(bundled.toc().len(), plain.toc().len());
 }

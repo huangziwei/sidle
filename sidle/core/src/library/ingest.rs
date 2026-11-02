@@ -606,7 +606,7 @@ mod tests {
             &NewBook {
                 sha256: title, // unique enough for tests
                 title,
-                author: "Author",
+                credits: &crate::library::credits::from_author_line("Author"),
                 language: "ja",
                 ppd: None,
                 epub_path: None,
@@ -1037,7 +1037,7 @@ mod tests {
             &NewBook {
                 sha256: "book-sha",
                 title: "栞のある本",
-                author: "Author",
+                credits: &crate::library::credits::from_author_line("Author"),
                 language: "ja",
                 ppd: None,
                 epub_path: None,
@@ -1101,7 +1101,7 @@ mod tests {
             &NewBook {
                 sha256: "book-sha",
                 title: "位置だけの本",
-                author: "Author",
+                credits: &crate::library::credits::from_author_line("Author"),
                 language: "ja",
                 ppd: None,
                 epub_path: None,
@@ -1176,7 +1176,7 @@ mod tests {
             &NewBook {
                 sha256: "iliad-src",
                 title: "The Iliad",
-                author: "Homer",
+                credits: &crate::library::credits::from_author_line("Homer"),
                 language: "en",
                 ppd: None,
                 epub_path: None,

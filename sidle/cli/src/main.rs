@@ -94,11 +94,20 @@ enum Command {
         apply: bool,
     },
     /// Write each book's metadata into the files that disagree with it: title,
-    /// authors, language, publisher and date.
+    /// credits, language, publisher and date.
     Bake {
         #[command(flatten)]
         select: Select,
         /// Without this, the disagreements are printed and nothing is written.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Read each book's credits from its EPUB where the file names the people the
+    /// row credits and states more about them (their roles), and store them.
+    Credits {
+        #[command(flatten)]
+        select: Select,
+        /// Without this, the credits to store are printed and nothing is written.
         #[arg(long)]
         apply: bool,
     },
@@ -155,8 +164,7 @@ fn run(cli: Cli) -> Result<()> {
     if matches!(cli.command, Command::Library(cmd::manage::LibraryCmd::Init)) {
         return cmd::manage::init(cli.root);
     }
-    // `inspect` reads a directory on this machine and opens no library. A
-    // checkout on a machine that has never run sidle is where it is called.
+    // `inspect` reads a directory on this machine and opens no library.
     if let Command::Apps(cmd::apps::AppsCmd::Inspect { path, files }) = &cli.command {
         return cmd::apps::inspect(cli.json, path, *files);
     }
@@ -175,6 +183,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Rekey { apply } => cmd::library::rekey(&ctx, apply),
         Command::Bake { select, apply } => cmd::library::bake(&ctx, &select, apply),
+        Command::Credits { select, apply } => cmd::library::credits(&ctx, &select, apply),
         Command::Romanize { text, language } => {
             println!(
                 "{}",

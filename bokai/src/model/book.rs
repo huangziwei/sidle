@@ -39,13 +39,35 @@ pub struct Resource {
     pub media_type: String,
 }
 
-/// A contributor with optional role and sort name.
-#[derive(Debug, Clone, Default)]
+/// A person or body credited for the book, with its sort key and roles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Contributor {
     pub name: String,
+    /// Sort key: EPUB `file-as`, KFX `author_pronunciation`, EXTH 517.
     pub file_as: Option<String>,
-    /// MARC relator code: "trl", "edt", "ill", etc.
-    pub role: Option<String>,
+    /// MARC relator codes (`aut`, `ill`, `edt`, `trl`, …) as stated; empty when none is.
+    pub roles: Vec<String>,
+}
+
+impl Contributor {
+    /// A credit with a name and nothing else stated.
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The same credit stating one role.
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        self.roles.push(role.into());
+        self
+    }
+
+    /// Whether `role` is among the stated roles, ASCII case aside.
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r.eq_ignore_ascii_case(role))
+    }
 }
 
 /// Collection/series information.
@@ -58,10 +80,29 @@ pub struct CollectionInfo {
     pub position: Option<f64>,
 }
 
+/// Whether two creators' role lists state the same roles: order, case and blanks
+/// aside, a list stating none reading as `aut`, the role of a creator stating
+/// none.
+pub fn roles_agree(a: &[String], b: &[String]) -> bool {
+    fn set(roles: &[String]) -> std::collections::BTreeSet<String> {
+        let set: std::collections::BTreeSet<String> = roles
+            .iter()
+            .map(|r| r.trim().to_ascii_lowercase())
+            .filter(|r| !r.is_empty())
+            .collect();
+        if set.is_empty() {
+            std::collections::BTreeSet::from(["aut".to_string()])
+        } else {
+            set
+        }
+    }
+    set(a) == set(b)
+}
+
 /// Whether an author's sort key for `old` holds for `new`: the same words in any
 /// order, case, commas and spacing aside (`Doe, Jane` → `Jane Doe`, `太宰治` →
 /// `太宰 治`).
-pub(crate) fn sort_key_survives(old: &str, new: &str) -> bool {
+pub fn sort_key_survives(old: &str, new: &str) -> bool {
     let squeezed = |s: &str| -> String {
         s.chars()
             .filter(|c| !c.is_whitespace() && *c != ',')
@@ -111,8 +152,8 @@ impl PeriodicalKind {
         }
     }
 
-    /// From a MOBI header type: 257 `News`, 258 `News_Feed`, 259
-    /// `News_Magazine`. Everything else is a book.
+    /// From a MOBI header type: 257 `News`, 258 `News_Feed`, 259 `News_Magazine`;
+    /// `None` for any other.
     pub fn from_mobi_type(t: u32) -> Option<Self> {
         match t {
             257 => Some(PeriodicalKind::Newspaper),
@@ -127,7 +168,8 @@ impl PeriodicalKind {
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub title: String,
-    pub authors: Vec<String>,
+    /// Primary credits in order: EPUB `<dc:creator>`, KFX `author`, EXTH 100, PDF `/Author`.
+    pub creators: Vec<Contributor>,
     pub language: String,
     pub identifier: String,
     /// The ASIN, apart from `identifier`; EPUB `<dc:identifier opf:scheme="ASIN">`.
@@ -140,12 +182,10 @@ pub struct Metadata {
     pub cover_image: Option<String>,
     /// dcterms:modified timestamp
     pub modified_date: Option<String>,
-    /// dc:contributor with roles (translators, editors, illustrators, etc.)
+    /// The secondary credits: EPUB `<dc:contributor>`, bokai's KFX `translator`.
     pub contributors: Vec<Contributor>,
     /// file-as for title (sort key)
     pub title_sort: Option<String>,
-    /// Sort keys aligned with `authors`: EPUB `file-as`, KFX `author_pronunciation`, EXTH 517.
-    pub author_sorts: Vec<String>,
     /// belongs-to-collection (series info)
     pub collection: Option<CollectionInfo>,
     /// OPF spine `page-progression-direction`: "ltr" | "rtl" | "default".
@@ -164,6 +204,29 @@ pub struct Metadata {
     pub default_viewport: Option<(u32, u32)>,
     /// `PeriodicalKind` of a periodical issue, `None` for a book; its issue date is `date`.
     pub periodical: Option<PeriodicalKind>,
+}
+
+impl Metadata {
+    /// Every creator's name, in order: the author list of a format that states no
+    /// roles.
+    pub fn creator_names(&self) -> Vec<String> {
+        self.creators.iter().map(|c| c.name.clone()).collect()
+    }
+
+    /// One sort key per creator up to the last that states one, a creator stating
+    /// none standing in with its name: the positional form of KFX
+    /// `author_pronunciation` and EXTH 517.
+    pub fn creator_sort_keys(&self) -> Vec<String> {
+        let len = self
+            .creators
+            .iter()
+            .rposition(|c| c.file_as.is_some())
+            .map_or(0, |i| i + 1);
+        self.creators[..len]
+            .iter()
+            .map(|c| c.file_as.clone().unwrap_or_else(|| c.name.clone()))
+            .collect()
+    }
 }
 
 /// A declared screen-orientation lock. `kindle_value` spells it for KF8
@@ -207,9 +270,9 @@ impl OrientationLock {
     }
 }
 
-/// A rectangle on a fixed-layout page, as fractions of the page box: `0.0` is
-/// its left/top edge and `1.0` its right/bottom. The fields are signed: a
-/// magnified view's image runs negative and past `1.0`.
+/// A rectangle on a fixed-layout page, as fractions of the page box: `0.0` is its
+/// left/top edge and `1.0` its right/bottom. `left` and `top` go negative, and
+/// `left + width` past `1.0`, for a magnified view's image.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PanelRect {
     pub left: f32,
@@ -564,9 +627,9 @@ impl Book {
             .unwrap_or_else(|| self.backend.metadata())
     }
 
-    /// Shadow the backend's parsed metadata with `meta`; every later
-    /// [`metadata`][Book::metadata] call sees it, and the source file is
-    /// untouched. Clone `metadata()` to keep identifier, ASIN and cover.
+    /// Shadow the backend's parsed metadata with `meta` for every later
+    /// [`metadata`][Book::metadata] call, leaving the source file untouched. Clone
+    /// `metadata()` to keep identifier, ASIN and cover.
     pub fn set_metadata_override(&mut self, meta: Metadata) {
         self.meta_override = Some(meta);
     }
@@ -576,9 +639,9 @@ impl Book {
         self.image_color_mode
     }
 
-    /// Cap the worker threads one parallel import or export stage may run at
-    /// once; `0` restores the platform's reported parallelism. Each worker
-    /// holds one job's working set, and the cap bounds peak memory.
+    /// Cap the worker threads one parallel import or export stage runs at once, and with
+    /// them peak memory, one job's working set each; `0` restores the platform's reported
+    /// parallelism.
     pub fn set_max_workers(&mut self, workers: usize) {
         self.max_workers = workers;
         self.backend.set_max_workers(workers);
@@ -590,9 +653,9 @@ impl Book {
         self.max_workers
     }
 
-    /// Choose how raster images encode into a KFX export. `Grayscale` emits
-    /// `8bppGray` JXR, `Color` emits `24bppRGB` JXR, and an image whose
-    /// channels match everywhere collapses to grayscale. The cover stays JPEG.
+    /// Choose how raster images encode into a KFX export: `Grayscale` as `8bppGray` JXR,
+    /// `Color` as `24bppRGB` JXR, collapsing one whose channels all match to grayscale
+    /// and leaving the cover JPEG.
     pub fn set_image_color_mode(&mut self, mode: crate::jxr::ColorMode) {
         self.image_color_mode = mode;
     }
@@ -639,8 +702,8 @@ impl Book {
         self.backend.load_chapter(id)
     }
 
-    /// Load a chapter as IR, holding each parsed chapter in an [`Arc`] cache
-    /// keyed by [`ChapterId`]. A second call for the same id clones the handle.
+    /// Load a chapter as IR, holding each parsed chapter in an [`Arc`] cache keyed by
+    /// [`ChapterId`] and cloning the handle on a repeat call.
     pub fn load_chapter_cached(&mut self, id: ChapterId) -> io::Result<Arc<Chapter>> {
         // Fast path: check read lock first
         {
@@ -669,9 +732,8 @@ impl Book {
         Ok(chapter_arc)
     }
 
-    /// Load several chapters as IR with caching, one bulk
-    /// `Importer::load_chapters` call for the misses. Results come back in
-    /// input order; the first backend error aborts.
+    /// Load several chapters as IR with caching, one bulk `Importer::load_chapters` call
+    /// for the misses, returning them in input order and stopping at the first backend error.
     pub fn load_chapters_cached(&mut self, ids: &[ChapterId]) -> io::Result<Vec<Arc<Chapter>>> {
         let misses: Vec<ChapterId> = {
             let cache = self
@@ -847,8 +909,7 @@ impl Book {
         self.backend.load_asset(path)
     }
 
-    /// Load several assets, one result per input path (implementations may
-    /// parallelize expensive per-asset work, e.g. KFX image transcodes).
+    /// Load several assets, one result per input path, in parallel where the `Importer` can.
     pub fn load_assets(&mut self, paths: &[std::path::PathBuf]) -> Vec<io::Result<Vec<u8>>> {
         self.backend.load_assets(paths)
     }
@@ -880,8 +941,8 @@ impl Book {
         self.backend.asset_manifest()
     }
 
-    /// The `@font-face` rules the CSS files declare, mapping a font family
-    /// name to its file. A KFX export builds one `font` entity per rule.
+    /// The `@font-face` rules the CSS files declare, mapping a font family name to its
+    /// file: one KFX `font` entity each.
     pub fn font_faces(&mut self) -> Vec<crate::model::FontFace> {
         self.backend.font_faces()
     }
@@ -921,9 +982,9 @@ impl Book {
         self.export_with_progress(format, writer, &|_, _, _, _| {})
     }
 
-    /// [`Book::export`], reporting `(phase_key, current, total, human_label)`
-    /// to `on_progress`. A KFX export emits `survey → chapters → images →
-    /// finalize`, an EPUB one `content → resources → … → finalize`.
+    /// [`Book::export`], reporting `(phase_key, current, total, human_label)` to
+    /// `on_progress`: `survey → chapters → images → finalize` for KFX, `content →
+    /// resources → … → finalize` for EPUB.
     pub fn export_with_progress<W: Write + Seek>(
         &mut self,
         format: Format,
@@ -969,6 +1030,44 @@ mod tests {
         assert!(sort_key_survives("Le Guin, Ursula K.", "Ursula K. Le Guin"));
         assert!(!sort_key_survives("Jane Doe", "Jane Roe"));
         assert!(!sort_key_survives("太宰治", "夏目漱石"));
+    }
+
+    #[test]
+    fn roles_agree_as_sets_with_none_reading_as_author() {
+        let v = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(roles_agree(&v(&[]), &v(&["aut"])));
+        assert!(roles_agree(&v(&[" AUT "]), &v(&["aut"])));
+        assert!(roles_agree(&v(&["dto", "aut"]), &v(&["aut", "dto", "aut"])));
+        assert!(!roles_agree(&v(&[]), &v(&["ill"])));
+        assert!(!roles_agree(&v(&["aut", "ill"]), &v(&["aut"])));
+    }
+
+    #[test]
+    fn creator_sort_keys_run_to_the_last_creator_that_states_one() {
+        let keyed = |name: &str, key: Option<&str>| Contributor {
+            file_as: key.map(str::to_string),
+            ..Contributor::named(name)
+        };
+        let mut m = Metadata {
+            creators: vec![
+                keyed("山田 太郎", Some("ヤマダ タロウ")),
+                keyed("絵師 花子", None),
+                keyed("ほか", Some("ホカ")),
+                keyed("末尾", None),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            m.creator_sort_keys(),
+            ["ヤマダ タロウ", "絵師 花子", "ホカ"],
+            "an inner gap takes the name; the unkeyed tail is left off"
+        );
+        m.creators.iter_mut().for_each(|c| c.file_as = None);
+        assert!(m.creator_sort_keys().is_empty());
+        assert_eq!(
+            m.creator_names(),
+            ["山田 太郎", "絵師 花子", "ほか", "末尾"]
+        );
     }
 
     #[test]

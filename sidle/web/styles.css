@@ -2332,6 +2332,59 @@ kbd {
   white-space: nowrap;
 }
 
+/* Credits: one row per person and role — name, role, remove. */
+.credits-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.credit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.metadata-fields .credit-row .credit-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.metadata-fields .credit-row .credit-role {
+  flex: 0 0 auto;
+}
+
+.credit-remove {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.credit-remove:hover {
+  color: var(--accent);
+}
+
+.credits-add {
+  align-self: flex-start;
+  padding-left: 0;
+}
+
+/* One book edits its credits row by row; the author line is a bulk field. */
+.modal-panel:not(.bulk) #field-author {
+  display: none;
+}
+
+/* A book crediting no author names its other credits in the Author column. */
+.byline-credits {
+  color: var(--muted);
+}
+
 /* Bulk-edit mode: collapse to one column and hide per-book-unique fields. */
 .modal-panel.bulk .modal-body {
   grid-template-columns: 1fr;

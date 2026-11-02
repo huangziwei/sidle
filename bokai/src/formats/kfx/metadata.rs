@@ -3,9 +3,8 @@
 
 use crate::model::Metadata;
 
-/// A CJK language family the Kindle treats specially (CJK fonts, upright
-/// vertical orientation, per-script reflow features). Latin/other languages
-/// don't classify.
+/// A CJK language family, set with CJK fonts, upright vertical orientation and
+/// per-script reflow features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CjkLang {
     /// Traditional Chinese (`tcn` in Amazon's reflow-feature vocabulary).
@@ -20,9 +19,8 @@ pub enum CjkLang {
     Ko,
 }
 
-/// Classify a book's (BCP-47-ish) language tag into a [`CjkLang`], or `None`
-/// for Latin/other. Case- and separator-insensitive (`zh_Hant`, `ZH-HANT`,
-/// `zh-hant` all match). Both language mappers below share it.
+/// Classify a book's (BCP-47-ish) language tag into a [`CjkLang`], or `None` for
+/// Latin/other, case- and separator-insensitively (`zh_Hant`, `ZH-HANT`, `zh-hant`).
 pub fn classify_cjk_language(book_lang: &str) -> Option<CjkLang> {
     let l = book_lang.trim().to_ascii_lowercase().replace('_', "-");
     match l.as_str() {
@@ -83,8 +81,7 @@ pub enum MetadataCategory {
     KindleEbook,
     /// Creator/audit information
     KindleAudit,
-    /// Device-level capability flags. A fixed-layout book states its
-    /// comic-reader keys here.
+    /// Device-level capability flags, a fixed-layout book's comic-reader keys among them.
     KindleCapability,
 }
 
@@ -157,8 +154,7 @@ pub enum MetadataField {
     AssetId,
     /// Book ID - from context (derived from identifier), not Metadata.
     BookId,
-    /// ASIN - from context. A sideloaded file gets a minted 32-char
-    /// uppercase-alphanumeric value, the Kindle library's per-book cache key.
+    /// ASIN, from context: for a sideload, a minted 32-char key the Kindle library caches.
     Asin,
     /// content_id - the same value as `Asin`.
     ContentId,
@@ -168,15 +164,13 @@ pub enum MetadataField {
     Translator,
     /// file-as for title (sort key)
     TitleSort,
-    /// Per-author sort keys (`Metadata.author_sorts`); emitted as one
-    /// `author_pronunciation` entry per author, like `Author`.
+    /// Positional creator sort keys, one `author_pronunciation` entry each, like `Author`.
     AuthorSort,
     /// Series/collection name
     SeriesName,
     /// Series position (group-position)
     SeriesPosition,
-    /// Whether the book ships typefaces of its own — from context, not
-    /// Metadata. Emitted as `override_kindle_font`.
+    /// Whether the book ships typefaces of its own, from context: `override_kindle_font`.
     PublisherFonts,
 }
 
@@ -199,9 +193,8 @@ impl MetadataField {
                     Some(&meta.language)
                 }
             }
-            // Single-author convenience. `build_category_entries` emits one
-            // repeated `author` entry per author, Amazon's shape.
-            MetadataField::Author => meta.authors.first().map(|s| s.as_str()),
+            // The first creator; `build_category_entries` emits one `author` per creator.
+            MetadataField::Author => meta.creators.first().map(|c| c.name.as_str()),
             MetadataField::Description => meta.description.as_deref(),
             MetadataField::Publisher => meta.publisher.as_deref(),
             MetadataField::Identifier => {
@@ -218,13 +211,12 @@ impl MetadataField {
                 // Find first contributor with role "trl"
                 meta.contributors
                     .iter()
-                    .find(|c| c.role.as_deref() == Some("trl"))
+                    .find(|c| c.has_role("trl"))
                     .map(|c| c.name.as_str())
             }
             MetadataField::TitleSort => meta.title_sort.as_deref(),
-            // Single-value convenience, like `Author`; `build_category_entries`
-            // emits one repeated `author_pronunciation` entry per element.
-            MetadataField::AuthorSort => meta.author_sorts.first().map(|s| s.as_str()),
+            // The first creator's key; `build_category_entries` emits every one.
+            MetadataField::AuthorSort => meta.creators.first().and_then(|c| c.file_as.as_deref()),
             MetadataField::SeriesName => meta.collection.as_ref().map(|c| c.name.as_str()),
             // These are context-driven or need special handling
             MetadataField::AssetId
@@ -376,21 +368,16 @@ pub struct MetadataContext<'a> {
     pub version: Option<&'a str>,
     /// Cover image resource name (e.g., "e6"), not the path.
     pub cover_resource_name: Option<&'a str>,
-    /// Asset ID (same as container ID, changes per export).
-    /// Format: "CR!" + 28 uppercase alphanumeric characters.
+    /// Asset ID, the container ID: "CR!" + 28 uppercase alphanumerics, new per export.
     pub asset_id: Option<&'a str>,
-    /// Book ID (stable per publication, derived from identifier).
-    /// Format: 23-character URL-safe Base64.
+    /// Book ID from the identifier, stable per publication: 23-character URL-safe Base64.
     pub book_id: Option<String>,
-    /// ASIN — real Amazon catalogue identifier, set only when the source
-    /// carries a genuine one (KFX → EPUB → KFX). A synthesized value returns
-    /// nothing from any catalogue query.
+    /// ASIN, set only from a genuine catalogue one the source carries (KFX → EPUB → KFX).
     pub asin: Option<String>,
     /// `override_kindle_font`: `true` offers the publisher's font in the picker.
     pub has_publisher_fonts: bool,
 
-    /// `content_id` — device-internal key for the per-book `.sdr` state
-    /// directory. An empty value breaks the in-book exit menu on a PDOC title.
+    /// `content_id`, keying the book's `.sdr` directory; a PDOC's exit menu needs it set.
     pub content_id: Option<String>,
 }
 
@@ -401,7 +388,7 @@ pub fn generate_book_id(identifier: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Version prefix (0x05 based on reference KFX files)
+    // Version prefix 0x05.
     let mut bytes = vec![0x05u8];
 
     // Hash the identifier to get deterministic bytes
@@ -464,18 +451,17 @@ pub fn generate_content_id(identifier: &str) -> String {
     out
 }
 
-/// Real Amazon catalogue ASINs are 10 characters, uppercase alphanumeric
-/// (no lowercase, no symbols). A bokai-synthesized fallback is 32 chars of
-/// Crockford-style Base32 — distinguishable by length alone.
+/// Whether `s` reads as a catalogue ASIN: 10 uppercase alphanumerics, where a
+/// synthesized key has 32.
 pub fn looks_like_real_amazon_asin(s: &str) -> bool {
     s.len() == 10
         && s.bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// The identifier a produced file carries, synthesized from `meta.identifier`
-/// via [`generate_content_id`]; `None` without one. A source ASIN never passes
-/// through: it collapses the conversion and its source into one library entry.
+/// The identifier a produced file carries, synthesized from `meta.identifier` via
+/// [`generate_content_id`]; `None` without one. `meta.asin` never passes through,
+/// keeping a conversion and its source two library entries.
 pub fn resolve_export_asin(meta: &Metadata) -> Option<String> {
     (!meta.identifier.is_empty()).then(|| generate_content_id(&meta.identifier))
 }
@@ -517,39 +503,32 @@ pub fn build_category_entries(
                         ctx.book_id.clone().map(MetadataValue::Text)
                     }
                     MetadataField::Asin => {
-                        // Passthrough only — never fabricated. Empty when the
-                        // source EPUB carries no ASIN.
+                        // Passed through, never fabricated.
                         ctx.asin.clone().map(MetadataValue::Text)
                     }
                     MetadataField::PublisherFonts => {
                         Some(MetadataValue::Bool(ctx.has_publisher_fonts))
                     }
                     MetadataField::ContentId => {
-                        // Device-internal `.sdr` key, synthesized from the
-                        // identifier. Independent of the ASIN.
+                        // The `.sdr` key synthesized from the identifier, apart from the ASIN.
                         ctx.content_id.clone().map(MetadataValue::Text)
                     }
                     MetadataField::Author => {
-                        // One `author` entry PER author — Amazon's
-                        // kindle_title_metadata repeats the key. The importer
-                        // reads each repeated key verbatim.
-                        for a in &meta.authors {
-                            entries.push((rule.key, MetadataValue::Text(a.clone())));
+                        // One `author` per creator, whatever its role: KFX states no roles.
+                        for a in meta.creator_names() {
+                            entries.push((rule.key, MetadataValue::Text(a)));
                         }
                         None
                     }
                     MetadataField::AuthorSort => {
-                        // Repeated per author like `author` — Amazon emits
-                        // the pronunciations positionally, one key per
-                        // author, in the same order.
-                        for s in &meta.author_sorts {
-                            entries.push((rule.key, MetadataValue::Text(s.clone())));
+                        // One `author_pronunciation` per key, positional with `author`.
+                        for s in meta.creator_sort_keys() {
+                            entries.push((rule.key, MetadataValue::Text(s)));
                         }
                         None
                     }
                     MetadataField::ModifiedDate => {
-                        // Always stamp the conversion time, never copy the source value —
-                        // modified_date describes *this file*, not the work.
+                        // The conversion time: `modified_date` dates this file, not the work.
                         Some(MetadataValue::Text(crate::util::time_now_iso8601_utc()))
                     }
                     MetadataField::Language => {
@@ -595,11 +574,11 @@ pub fn build_category_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Contributor;
 
     #[test]
     fn test_cjk_language_mappers() {
-        // Traditional Chinese: book form differs from per-style form (verified
-        // against Amazon's own KFX: book `zh-hant`, styles `zh-tw`).
+        // Traditional Chinese: `zh-hant` for the book, `zh-tw` per style.
         for tag in ["zh-Hant", "zh-TW", "zh_Hant", "ZH-HANT", "zh-HK"] {
             assert_eq!(kfx_book_language(tag), "zh-hant", "book {tag}");
             assert_eq!(kfx_content_language(tag), "zh-tw", "style {tag}");
@@ -630,7 +609,7 @@ mod tests {
     fn test_metadata_field_extraction() {
         let meta = Metadata {
             title: "Test Book".to_string(),
-            authors: vec!["Author One".to_string()],
+            creators: vec![Contributor::named("Author One")],
             language: "en".to_string(),
             description: Some("A description".to_string()),
             publisher: None,
@@ -651,7 +630,7 @@ mod tests {
     fn test_build_category_entries() {
         let meta = Metadata {
             title: "Test Book".to_string(),
-            authors: vec!["Author".to_string()],
+            creators: vec![Contributor::named("Author")],
             language: "en".to_string(),
             ..Default::default()
         };
@@ -715,10 +694,15 @@ mod tests {
         let meta = Metadata {
             title: "星の王子さま".to_string(),
             language: "ja".to_string(),
-            authors: vec!["サン・テグジュペリ".to_string(), "管 啓次郎".to_string()],
-            author_sorts: vec![
-                "サン テグジュペリ".to_string(),
-                "スガ ケイジロウ".to_string(),
+            creators: vec![
+                Contributor {
+                    file_as: Some("サン テグジュペリ".to_string()),
+                    ..Contributor::named("サン・テグジュペリ")
+                },
+                Contributor {
+                    file_as: Some("スガ ケイジロウ".to_string()),
+                    ..Contributor::named("管 啓次郎").with_role("trl")
+                },
             ],
             ..Default::default()
         };
@@ -861,9 +845,7 @@ mod tests {
         }
     }
 
-    /// A periodical is a personal document like everything else this writer
-    /// produces; its genre never reaches `cde_content_type`. See that rule for
-    /// why declaring `MAGZ`/`NWPR`/`FEED` blanks the cover.
+    /// `cde_content_type` stays `PDOC` for a periodical.
     #[test]
     fn a_periodical_is_still_declared_pdoc() {
         use crate::model::PeriodicalKind;
@@ -917,8 +899,7 @@ mod tests {
             entry(&plain, "is_sample"),
             Some(MetadataValue::Bool(false))
         ));
-        // No typefaces of its own: the device fonts are the only choice, with
-        // no Publisher Font entry.
+        // `override_kindle_font` is `false` for a book without typefaces of its own.
         assert!(matches!(
             entry(&plain, "override_kindle_font"),
             Some(MetadataValue::Bool(false))
@@ -936,9 +917,7 @@ mod tests {
 
     #[test]
     fn export_asin_is_synthesized_even_from_a_catalogue_source() {
-        // A conversion is not the catalogue item it was made from, and a
-        // Kindle keys its catalog on this value: stamped with the original's
-        // ASIN, the two are one entry to the device.
+        // `resolve_export_asin` keeps a catalogue source's ASIN out of the conversion.
         let from_store = Metadata {
             asin: Some("B0CPJ2B88T".to_string()),
             identifier: "urn:uuid:9f1c".to_string(),
@@ -949,15 +928,14 @@ mod tests {
         assert_eq!(stamped, generate_content_id("urn:uuid:9f1c"));
         assert!(!looks_like_real_amazon_asin(&stamped));
 
-        // Derived from the identifier alone: the same book converted twice
-        // keeps the reading position bound to it.
+        // Derived from the identifier alone, stable across conversions of one book.
         let no_asin = Metadata {
             identifier: "urn:uuid:9f1c".to_string(),
             ..Default::default()
         };
         assert_eq!(resolve_export_asin(&no_asin).as_deref(), Some(&*stamped));
 
-        // Nothing to derive from: the caller has to supply an identifier.
+        // `None` without an identifier.
         assert_eq!(resolve_export_asin(&Metadata::default()), None);
     }
 
@@ -968,9 +946,7 @@ mod tests {
             language: "en".to_string(),
             ..Default::default()
         };
-        // Both populated: real ASIN passed through, synthesized content_id
-        // distinct from it. Common shape for KFX → EPUB → KFX where the
-        // source carried a catalogue ASIN.
+        // Both populated: the ASIN passed through, `content_id` synthesized apart from it.
         let ctx = MetadataContext {
             asin: Some("B0CPJ2B88T".to_string()),
             content_id: Some("GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2".to_string()),
@@ -988,8 +964,7 @@ mod tests {
                 .any(|(k, v)| *k == "content_id" && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2")
         );
 
-        // content_id present, ASIN absent: typical PDOC sideload from an
-        // EPUB without a catalogue ASIN.
+        // `content_id` present, ASIN absent.
         let ctx_pdoc = MetadataContext {
             content_id: Some("GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2".to_string()),
             ..Default::default()

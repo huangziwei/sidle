@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::library::authors;
+use crate::library::credits;
 use crate::library::db::{self, BookRow};
 use crate::library::paths::{LibraryPaths, format_basename};
 
@@ -21,7 +21,7 @@ pub fn rename_book_files(
         return Ok(None);
     };
 
-    let author_list = authors::split_display(&book.author);
+    let author_list = credits::author_names(&book.credits);
     let basename = format_basename(&author_list, &book.title, book.published_at.as_deref());
     let dir = paths.book_dir(&book.sha256);
 
@@ -109,7 +109,7 @@ mod tests {
             &NewBook {
                 sha256: sha,
                 title: "Old Title",
-                author: "Old Author",
+                credits: &crate::library::credits::from_author_line("Old Author"),
                 language: "en",
                 pdf_path: Some(&pdf.to_string_lossy()),
                 kfx_path: Some(&kfx.to_string_lossy()),

@@ -6,12 +6,17 @@ use std::path::{Component, Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use super::credits::{self, Credit};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BookRow {
     pub id: i64,
     pub sha256: String,
     pub title: String,
+    /// The author line: the names of the `credits` that count as authors.
     pub author: String,
+    /// Every credited name in order, each with its roles.
+    pub credits: Vec<Credit>,
     pub language: String,
     pub ppd: Option<String>,
     /// `horizontal-lr`, `horizontal-rl`, `vertical-rl`, `vertical-lr`, or `None` to derive.
@@ -61,7 +66,7 @@ pub struct BookRow {
 }
 
 /// Schema version [`migrate`] stamps into `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// A borrowable handle to the library database.
 pub trait Access {
@@ -235,6 +240,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             series_name       TEXT,
             series_index      REAL,
             tags              TEXT NOT NULL DEFAULT '[]',
+            credits           TEXT NOT NULL DEFAULT '[]',
             updated_at        TEXT
         );
 
@@ -598,6 +604,35 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute(
                 "UPDATE books SET title_romaji = ?1, author_romaji = ?2 WHERE id = ?3",
                 params![title_romaji, author_romaji, id],
+            )?;
+        }
+    }
+
+    // `credits` lists every credited name with its roles, `author` drawn from it. A row
+    // naming authors and no credits takes them from its author line, stating no roles, on
+    // every `open()` and leaving `updated_at` alone.
+    if !has_column(conn, "books", "credits")? {
+        conn.execute(
+            "ALTER TABLE books ADD COLUMN credits TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt =
+                conn.prepare("SELECT id, author FROM books WHERE credits = '[]' AND author != ''")?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, author) in rows {
+            let from_line = credits::from_author_line(&author);
+            conn.execute(
+                "UPDATE books SET credits = ?1, author = ?2 WHERE id = ?3",
+                params![
+                    credits_json(&from_line)?,
+                    credits::author_line(&from_line),
+                    id
+                ],
             )?;
         }
     }
@@ -1031,12 +1066,12 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
              series_name, series_index, tags, kfx_sha256, pdf_path, updated_at,
-             title_romaji, author_romaji, amazon_asin, source_format)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"#,
+             title_romaji, author_romaji, amazon_asin, source_format, credits)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"#,
         params![
             book.sha256,
             book.title,
-            book.author,
+            credits::author_line(book.credits),
             book.language,
             book.ppd,
             epub_rel,
@@ -1058,9 +1093,25 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.author_romaji,
             book.amazon_asin,
             book.source_format,
+            credits_json(book.credits)?,
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// `credits` as the JSON array TEXT the `credits` column stores.
+fn credits_json(credits: &[Credit]) -> rusqlite::Result<String> {
+    serde_json::to_string(credits).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+/// The stored `credits` as the stored author line states them: a line written alone
+/// replaces the authors with its names.
+fn reconciled(stored: Vec<Credit>, author: &str) -> Vec<Credit> {
+    if credits::author_line(&stored) == author {
+        stored
+    } else {
+        credits::with_authors(&stored, &credits::split_display(author))
+    }
 }
 
 /// Create or replace the job row for a book. `kind` is set on first insert and kept
@@ -1269,7 +1320,11 @@ pub fn book_asins(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct MetadataPatch {
     pub title: String,
+    /// The author line, replacing the authors without `credits`, drawn from `credits` given.
     pub author: String,
+    /// The whole credit list, when the edit states one.
+    #[serde(default)]
+    pub credits: Option<Vec<Credit>>,
     pub language: String,
     /// Page progression direction: `"rtl"` | `"ltr"` | `None` (Auto), baked into the
     /// generated KFX's reading order.
@@ -1298,6 +1353,19 @@ pub fn update_metadata(
 ) -> rusqlite::Result<()> {
     let tags_json = serde_json::to_string(&patch.tags)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let credits = match &patch.credits {
+        Some(c) => c.clone(),
+        None => {
+            let current = get_book(conn, book_id)?
+                .map(|b| b.credits)
+                .unwrap_or_default();
+            if patch.author == credits::author_line(&current) {
+                current
+            } else {
+                credits::with_authors(&current, &credits::split_display(&patch.author))
+            }
+        }
+    };
     conn.execute(
         r#"UPDATE books
               SET title         = ?1,
@@ -1312,11 +1380,12 @@ pub fn update_metadata(
                   tags          = ?10,
                   title_romaji  = ?11,
                   author_romaji = ?12,
-                  updated_at    = ?13
+                  updated_at    = ?13,
+                  credits       = ?15
               WHERE id = ?14"#,
         params![
             patch.title,
-            patch.author,
+            credits::author_line(&credits),
             patch.language,
             patch.ppd,
             patch.writing_mode,
@@ -1329,6 +1398,7 @@ pub fn update_metadata(
             patch.author_romaji,
             now_iso(),
             book_id,
+            credits_json(&credits)?,
         ],
     )?;
     Ok(())
@@ -1338,8 +1408,13 @@ pub fn update_metadata(
 /// book, `Some(v)` sets `v` on every book.
 #[derive(Debug, Default, Deserialize)]
 pub struct BulkMetadataPatch {
+    /// An author line whose names replace every book's authors, other credits kept.
     #[serde(default)]
     pub author: Option<String>,
+    /// Credits each book gives these roles, adding a name it lacks; see
+    /// [`credits::assign`].
+    #[serde(default)]
+    pub credits: Vec<Credit>,
     #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
@@ -1371,8 +1446,14 @@ pub fn apply_bulk_patch(
         return Ok(false);
     };
 
-    let author = patch.author.clone().unwrap_or(row.author);
+    let mut book_credits = row.credits;
+    if let Some(author) = patch.author.as_ref().filter(|a| **a != row.author) {
+        book_credits = credits::with_authors(&book_credits, &credits::split_display(author));
+    }
+    let book_credits = credits::assign(&book_credits, &patch.credits);
+    let author = credits::author_line(&book_credits);
     let language = patch.language.clone().unwrap_or(row.language);
+    let author_romaji = romaji_of_line(&row.author, row.author_romaji, &author, &language);
     let ppd = patch.ppd.clone().or(row.ppd);
     let writing_mode = patch.writing_mode.clone().or(row.writing_mode);
     let publisher = patch.publisher.clone().or(row.publisher);
@@ -1402,16 +1483,18 @@ pub fn apply_bulk_patch(
 
     conn.execute(
         r#"UPDATE books
-              SET author       = ?1,
-                  language     = ?2,
-                  ppd          = ?3,
-                  writing_mode = ?4,
-                  publisher    = ?5,
-                  published_at = ?6,
-                  series_name  = ?7,
-                  series_index = ?8,
-                  tags         = ?9,
-                  updated_at   = ?10
+              SET author        = ?1,
+                  language      = ?2,
+                  ppd           = ?3,
+                  writing_mode  = ?4,
+                  publisher     = ?5,
+                  published_at  = ?6,
+                  series_name   = ?7,
+                  series_index  = ?8,
+                  tags          = ?9,
+                  updated_at    = ?10,
+                  credits       = ?12,
+                  author_romaji = ?13
               WHERE id = ?11"#,
         params![
             author,
@@ -1425,6 +1508,40 @@ pub fn apply_bulk_patch(
             tags_json,
             now_iso(),
             book_id,
+            credits_json(&book_credits)?,
+            author_romaji,
+        ],
+    )?;
+    Ok(true)
+}
+
+/// The author romaji for `new_line`: `old_romaji` while the line stays `old_line`, else
+/// rendered afresh.
+fn romaji_of_line(old_line: &str, old_romaji: String, new_line: &str, language: &str) -> String {
+    if new_line == old_line {
+        old_romaji
+    } else {
+        super::romaji::romanize_field(new_line, None, language)
+    }
+}
+
+/// Store `new` as a book's credits with the author line drawn from them, its
+/// romaji re-rendered when the line changes. Returns `Ok(false)` for an absent id.
+pub fn set_credits(conn: &Connection, book_id: i64, new: &[Credit]) -> rusqlite::Result<bool> {
+    let Some(row) = get_book(conn, book_id)? else {
+        return Ok(false);
+    };
+    let author = credits::author_line(new);
+    let author_romaji = romaji_of_line(&row.author, row.author_romaji, &author, &row.language);
+    conn.execute(
+        "UPDATE books SET credits = ?1, author = ?2, author_romaji = ?3, updated_at = ?4
+         WHERE id = ?5",
+        params![
+            credits_json(new)?,
+            author,
+            author_romaji,
+            now_iso(),
+            book_id
         ],
     )?;
     Ok(true)
@@ -1487,7 +1604,8 @@ pub fn get_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<Book
 pub struct NewBook<'a> {
     pub sha256: &'a str,
     pub title: &'a str,
-    pub author: &'a str,
+    /// Every credited name with its roles; the author line is drawn from them.
+    pub credits: &'a [Credit],
     pub language: &'a str,
     pub ppd: Option<&'a str>,
     pub epub_path: Option<&'a str>,
@@ -1527,7 +1645,7 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin, b.source_format
+           b.writing_mode, b.amazon_asin, b.source_format, b.credits
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -1542,7 +1660,7 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin, b.source_format
+           b.writing_mode, b.amazon_asin, b.source_format, b.credits
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -1557,7 +1675,7 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin, b.source_format
+           b.writing_mode, b.amazon_asin, b.source_format, b.credits
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -1573,7 +1691,7 @@ const SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin, b.source_format
+           b.writing_mode, b.amazon_asin, b.source_format, b.credits
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.series_name = ?1 AND b.series_index = ?2
@@ -1590,7 +1708,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin, b.source_format
+           b.writing_mode, b.amazon_asin, b.source_format, b.credits
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -1608,7 +1726,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
            COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
-           b.writing_mode, b.amazon_asin, b.source_format
+           b.writing_mode, b.amazon_asin, b.source_format, b.credits
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1 ESCAPE '\'
@@ -1669,12 +1787,17 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
     let series_name: Option<String> = row.get(17)?;
     let title_romaji: String = row.get(23)?;
     let author_romaji: String = row.get(24)?;
+    let credits_json: String = row.get(28)?;
+    let book_credits = reconciled(
+        serde_json::from_str(&credits_json).unwrap_or_default(),
+        &author,
+    );
     // Derived (not a column): the device match key — curated romaji (or a live
     // fallback when a column is empty) + auto-romanized series/publisher/tags +
-    // the raw fields. Recomputed fresh on every read.
+    // the raw fields, every credited name among them. Recomputed fresh on every read.
     let search_key = super::romaji::search_key(
         &title,
-        &author,
+        &credits::join_display(&credits::names(&book_credits)),
         publisher.as_deref(),
         series_name.as_deref(),
         &tags,
@@ -1692,6 +1815,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         sha256,
         title,
         author,
+        credits: book_credits,
         language,
         ppd: row.get(5)?,
         writing_mode: row.get(25)?,
@@ -2690,7 +2814,7 @@ mod tests {
             &NewBook {
                 sha256: sha,
                 title,
-                author: "",
+                credits: &[],
                 language: "",
                 ppd: None,
                 epub_path: None,
@@ -2765,7 +2889,7 @@ mod tests {
             &NewBook {
                 sha256: sha,
                 title: "T",
-                author: "",
+                credits: &[],
                 language,
                 ppd: None,
                 epub_path: None,
@@ -3014,7 +3138,7 @@ mod tests {
             &NewBook {
                 sha256: "sha-pdf",
                 title: "PDF Book",
-                author: "",
+                credits: &[],
                 language: "en",
                 ppd: None,
                 epub_path: None,
@@ -3541,6 +3665,7 @@ mod tests {
         let patch = MetadataPatch {
             title: "新しいタイトル".into(),
             author: "村上春樹".into(),
+            credits: None,
             language: "ja".into(),
             ppd: None,
             writing_mode: None,
@@ -3577,6 +3702,7 @@ mod tests {
             &MetadataPatch {
                 title: "x".into(),
                 author: "a".into(),
+                credits: None,
                 language: "en".into(),
                 ppd: None,
                 writing_mode: None,
@@ -3598,6 +3724,7 @@ mod tests {
             &MetadataPatch {
                 title: "x".into(),
                 author: "a".into(),
+                credits: None,
                 language: "en".into(),
                 ppd: None,
                 writing_mode: None,
@@ -3629,6 +3756,7 @@ mod tests {
             &MetadataPatch {
                 title: "x".into(),
                 author: "".into(),
+                credits: None,
                 language: "".into(),
                 ppd: None,
                 writing_mode: None,
@@ -3652,6 +3780,7 @@ mod tests {
             &MetadataPatch {
                 title: "x".into(),
                 author: "".into(),
+                credits: None,
                 language: "".into(),
                 ppd: None,
                 writing_mode: None,
@@ -3686,6 +3815,7 @@ mod tests {
             &MetadataPatch {
                 title: "x".into(),
                 author: "".into(),
+                credits: None,
                 language: "".into(),
                 ppd: None,
                 writing_mode: None,
@@ -3739,6 +3869,94 @@ mod tests {
     }
 
     #[test]
+    fn a_row_without_credits_takes_them_from_its_author_line() {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        conn.execute("ALTER TABLE books DROP COLUMN credits", [])
+            .expect("undo the column");
+        conn.execute(
+            "INSERT INTO books (sha256, title, author, language, file_size, imported_at, tags)
+             VALUES ('sha', 'T', 'Ann Writer&Bo Cowriter', 'en', 0, '2026-01-01T00:00:00+00:00', '[]')",
+            [],
+        )
+        .expect("seed a row from before credits");
+        let id = conn.last_insert_rowid();
+
+        migrate(&conn).expect("re-migrate");
+        let row = get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(
+            row.credits,
+            [Credit::named("Ann Writer"), Credit::named("Bo Cowriter")]
+        );
+        assert_eq!(
+            row.author, "Ann Writer & Bo Cowriter",
+            "the line is redrawn"
+        );
+        assert_eq!(
+            row.updated_at, "2026-01-01T00:00:00+00:00",
+            "a backfill, not an edit"
+        );
+    }
+
+    #[test]
+    fn a_writer_of_the_author_line_alone_replaces_the_authors() {
+        let conn = fresh_db();
+        let id = insert_book(
+            &conn,
+            &NewBook {
+                credits: &[
+                    Credit::with_roles("Ann Writer", &["aut"]),
+                    Credit::with_roles("Ivy Drawer", &["ill"]),
+                ],
+                ..new_book_shell("sha-line")
+            },
+        )
+        .unwrap();
+        assert_eq!(get_book(&conn, id).unwrap().unwrap().author, "Ann Writer");
+
+        conn.execute(
+            "UPDATE books SET author = 'Ann Writer & Bo Cowriter' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        assert_eq!(
+            get_book(&conn, id).unwrap().unwrap().credits,
+            [
+                Credit::with_roles("Ann Writer", &["aut"]),
+                Credit::named("Bo Cowriter"),
+                Credit::with_roles("Ivy Drawer", &["ill"]),
+            ]
+        );
+    }
+
+    fn new_book_shell(sha: &str) -> NewBook<'_> {
+        NewBook {
+            sha256: sha,
+            title: "T",
+            credits: &[],
+            language: "en",
+            ppd: None,
+            epub_path: None,
+            cover_path: None,
+            kfx_path: None,
+            kfx_sha256: None,
+            pdf_path: None,
+            file_size: 0,
+            imported_at: "2026-01-01T00:00:00+00:00",
+            asin: None,
+            amazon_asin: None,
+            publisher: None,
+            published_at: None,
+            series_name: None,
+            series_index: None,
+            tags: &[],
+            title_romaji: "",
+            author_romaji: "",
+            source_format: None,
+        }
+    }
+
+    #[test]
     fn the_migration_lifts_a_catalogue_asin_out_of_the_file_key() {
         // A pre-split library: `asin` holds what the export stamped, for a store-bought
         // source the catalogue ASIN.
@@ -3784,6 +4002,7 @@ mod tests {
             &MetadataPatch {
                 title: "Original".into(),
                 author: "Asimov".into(),
+                credits: None,
                 language: "en".into(),
                 ppd: None,
                 writing_mode: None,
@@ -3894,7 +4113,7 @@ mod tests {
                 &NewBook {
                     sha256: sha,
                     title: "T",
-                    author: "A",
+                    credits: &crate::library::credits::from_author_line("A"),
                     language: "",
                     ppd: None,
                     epub_path: Some(&epub_abs.to_string_lossy()),
@@ -4525,7 +4744,7 @@ mod tests {
             &NewBook {
                 sha256: sha,
                 title,
-                author: "",
+                credits: &[],
                 language: "",
                 ppd: None,
                 epub_path: None,

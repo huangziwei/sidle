@@ -1351,7 +1351,7 @@ mod tests {
             &NewBook {
                 sha256: "book-sha",
                 title: "栞のある本",
-                author: "Author",
+                credits: &sidle_core::library::credits::from_author_line("Author"),
                 language: "ja",
                 ppd: None,
                 epub_path: None,

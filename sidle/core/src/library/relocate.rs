@@ -208,7 +208,7 @@ mod tests {
                 &db::NewBook {
                     sha256: sha,
                     title,
-                    author: "",
+                    credits: &[],
                     language: "",
                     ppd: None,
                     epub_path: Some(&epub_s),
@@ -271,7 +271,7 @@ mod tests {
                 &db::NewBook {
                     sha256: sha,
                     title,
-                    author: "",
+                    credits: &[],
                     language: "",
                     ppd: None,
                     epub_path: None,

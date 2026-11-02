@@ -1,5 +1,5 @@
 //! A metadata edit: the row, and the book's files, which state the same title,
-//! authors, language, publisher and date.
+//! credits, language, publisher and date.
 
 use std::path::Path;
 
@@ -10,16 +10,26 @@ use bokai::formats::pdf::metadata_edit as pdf_meta;
 use rusqlite::Connection;
 use serde::Serialize;
 
+use crate::library::credits::{self, Credit};
 use crate::library::db::{self, BookRow, BulkMetadataPatch, MetadataPatch};
 use crate::library::paths::LibraryPaths;
-use crate::library::{authors, lang, rename, romaji, source};
+use crate::library::{lang, rename, romaji, source};
 
-/// Canonicalize and validate a full-replacement patch, in place. Every field
-/// arrives on each submit, and none carries an "unchanged" state.
-pub fn normalize(patch: &mut MetadataPatch) -> anyhow::Result<()> {
+/// Canonicalize and validate a full-replacement patch against the book's
+/// `current` credits, in place. Every field arrives on each submit, and none
+/// carries an "unchanged" state; `credits` comes out stated.
+pub fn normalize(patch: &mut MetadataPatch, current: &[Credit]) -> anyhow::Result<()> {
     patch.title = patch.title.trim().to_string();
-    // Split on `&`/「、」 (a comma is intra-name), flip `Surname, Given`, re-join.
-    patch.author = authors::join_display(&authors::parse_input(&patch.author));
+    // A stated list is canonicalized; else a changed author line — split on
+    // `&`/「、」 (a comma is intra-name), `Surname, Given` flipped — replaces the
+    // authors, and an unchanged one leaves every credit as it is.
+    let list = match patch.credits.take() {
+        Some(list) => credits::normalize(list),
+        None if patch.author.trim() == credits::author_line(current) => current.to_vec(),
+        None => credits::with_authors(current, &credits::parse_input(&patch.author)),
+    };
+    patch.author = credits::author_line(&list);
+    patch.credits = Some(list);
     // en-US → en, eng → en, zh-TW → zh-Hant, as an import stores it.
     patch.language = lang::normalize(&patch.language);
     // `rtl`/`ltr` only; anything else is `None` (Auto).
@@ -59,9 +69,10 @@ pub fn normalize_bulk(patch: &mut BulkMetadataPatch) -> anyhow::Result<()> {
     // Canonicalize the bulk author the same way as a single edit; an empty
     // result clears it back to None.
     if let Some(a) = patch.author.take() {
-        let canon = authors::join_display(&authors::parse_input(&a));
+        let canon = credits::join_display(&credits::parse_input(&a));
         patch.author = (!canon.is_empty()).then_some(canon);
     }
+    patch.credits = credits::normalize(std::mem::take(&mut patch.credits));
     trim_to_none(&mut patch.language);
     if let Some(l) = patch.language.take() {
         let canon = lang::normalize(&l);
@@ -128,13 +139,13 @@ pub fn edit_row(
 ) -> anyhow::Result<Edited> {
     let before =
         db::get_book(conn, book_id)?.ok_or_else(|| anyhow::anyhow!("book {book_id} not found"))?;
-    normalize(&mut patch)?;
+    normalize(&mut patch, &before.credits)?;
     db::update_metadata(conn, book_id, &patch)?;
     let row = rename::rename_book_files(conn, paths, book_id)?
         .ok_or_else(|| anyhow::anyhow!("book {book_id} not found"))?;
     Ok(Edited {
         cleared: Cleared::between(&before, &row),
-        reaches_files: FileMetadata::of(&before) != FileMetadata::of(&row),
+        reaches_files: !FileMetadata::of(&before).states_the_same(&FileMetadata::of(&row)),
         row,
     })
 }
@@ -162,6 +173,7 @@ pub fn edit_rows(
 ) -> anyhow::Result<Vec<Edited>> {
     normalize_bulk(&mut patch)?;
     let reaches_files = patch.author.is_some()
+        || !patch.credits.is_empty()
         || patch.language.is_some()
         || patch.publisher.is_some()
         || patch.published_at.is_some();
@@ -209,11 +221,11 @@ pub fn log_failures(book: &BookRow, reports: &[FileReport]) {
 // --- the book's files ---------------------------------------------------------
 
 /// The fields every file of a book states for its row; series, tags and romaji
-/// stay in the row.
+/// stay in the row. Every format names the credits; an EPUB states their roles.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileMetadata {
     pub title: String,
-    pub authors: Vec<String>,
+    pub creators: Vec<Credit>,
     pub language: String,
     pub publisher: Option<String>,
     pub date: Option<String>,
@@ -224,18 +236,32 @@ impl FileMetadata {
     pub fn of(book: &BookRow) -> Self {
         Self {
             title: book.title.clone(),
-            authors: authors::split_display(&book.author),
+            creators: book.credits.clone(),
             language: book.language.clone(),
             publisher: book.publisher.clone(),
             date: book.published_at.clone(),
         }
+    }
+
+    /// Whether `self` and `other` state the same fields to a file, no role and `aut` alike.
+    pub fn states_the_same(&self, other: &Self) -> bool {
+        self.title == other.title
+            && self.language == other.language
+            && self.publisher == other.publisher
+            && self.date == other.date
+            && self.creators.len() == other.creators.len()
+            && self
+                .creators
+                .iter()
+                .zip(&other.creators)
+                .all(|(a, b)| a.name == b.name && bokai::model::roles_agree(&a.roles, &b.roles))
     }
 }
 
 /// The fields an edit emptied: the only fields a bake removes from a file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Cleared {
-    pub authors: bool,
+    pub creators: bool,
     pub publisher: bool,
     pub date: bool,
 }
@@ -244,7 +270,7 @@ impl Cleared {
     /// What the edit from `before` to `after` emptied.
     pub fn between(before: &BookRow, after: &BookRow) -> Self {
         Self {
-            authors: !before.author.trim().is_empty() && after.author.trim().is_empty(),
+            creators: !before.credits.is_empty() && after.credits.is_empty(),
             publisher: before.publisher.is_some() && after.publisher.is_none(),
             date: before.published_at.is_some() && after.published_at.is_none(),
         }
@@ -360,6 +386,40 @@ pub fn baked_bytes(
     Ok((rewritten != bytes).then_some(rewritten))
 }
 
+/// The credits `book`'s EPUB states when they name the row's people (one author line)
+/// and say more: another role, or one credit the row holds as two. `None` without an
+/// EPUB on disk, for other people, or for nothing new.
+pub fn credits_from_epub(book: &BookRow) -> anyhow::Result<Option<Vec<Credit>>> {
+    let Some(path) = book.epub_path.as_deref().filter(|p| Path::new(p).is_file()) else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(path).with_context(|| format!("read {path}"))?;
+    let file = credits::from_metadata(&stated(FileFormat::Epub, &bytes)?);
+    let line = |c: &[Credit]| credits::join_display(&credits::names(c));
+    if line(&file) != line(&book.credits) {
+        return Ok(None);
+    }
+    let adds_nothing = file.len() == book.credits.len()
+        && file
+            .iter()
+            .zip(&book.credits)
+            .all(|(f, r)| f.name == r.name && bokai::model::roles_agree(&f.roles, &r.roles));
+    Ok((!adds_nothing).then_some(file))
+}
+
+/// Store `credits` for `book_id` and rename its files to the author line they
+/// draw. The files are not written: the credits come from them.
+pub fn adopt_credits(
+    conn: &Connection,
+    paths: &LibraryPaths,
+    book_id: i64,
+    credits: &[Credit],
+) -> anyhow::Result<BookRow> {
+    db::set_credits(conn, book_id, credits)?;
+    rename::rename_book_files(conn, paths, book_id)?
+        .ok_or_else(|| anyhow::anyhow!("book {book_id} not found"))
+}
+
 /// What a file states, read the way an import reads it.
 fn stated(format: FileFormat, bytes: &[u8]) -> anyhow::Result<bokai::Metadata> {
     Ok(match format {
@@ -373,15 +433,58 @@ fn stated(format: FileFormat, bytes: &[u8]) -> anyhow::Result<bokai::Metadata> {
             let doc = bokai::import::probe_pdf(bytes.to_vec())?;
             bokai::Metadata {
                 title: doc.title.unwrap_or_default(),
-                authors: doc.author.into_iter().collect(),
+                creators: doc
+                    .author
+                    .into_iter()
+                    .map(bokai::Contributor::named)
+                    .collect(),
                 ..Default::default()
             }
         }
     })
 }
 
+/// `name` with its whitespace runs collapsed to single spaces, as a credit stores it.
+fn collapsed(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `file` states roles other than those `want` claims, a credit stating none
+/// claiming nothing: place by place for lists pairing name for name, else against a
+/// creator whose name contains the credit's.
+fn roles_drift(file: &[bokai::Contributor], want: &[Credit]) -> bool {
+    let paired = file.len() == want.len()
+        && file
+            .iter()
+            .zip(want)
+            .all(|(f, w)| collapsed(&f.name) == w.name);
+    if paired {
+        return file
+            .iter()
+            .zip(want)
+            .any(|(f, w)| !w.roles.is_empty() && !bokai::model::roles_agree(&f.roles, &w.roles));
+    }
+    want.iter().filter(|w| !w.roles.is_empty()).any(|w| {
+        !file.iter().any(|f| {
+            collapsed(&f.name).contains(w.name.as_str())
+                && bokai::model::roles_agree(&f.roles, &w.roles)
+        })
+    })
+}
+
+/// Each name with its roles: `A (aut); B (ill)`.
+fn credit_list<'a>(credits: impl Iterator<Item = (&'a str, &'a [String])>) -> String {
+    credits
+        .map(|(name, roles)| match roles {
+            [] => name.to_string(),
+            _ => format!("{name} ({})", roles.join(", ")),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// The fields `file` disagrees with `want` on; a PDF's `/Info` holds the title
-/// and authors alone.
+/// and authors alone, and only an EPUB states roles.
 fn drift(
     format: FileFormat,
     file: &bokai::Metadata,
@@ -400,18 +503,35 @@ fn drift(
     if file.title.trim() != want.title.trim() {
         push(&mut out, "title", &file.title, &want.title);
     }
-    let file_authors: Vec<String> = file
-        .authors
+    let file_names: Vec<String> = file
+        .creators
         .iter()
-        .map(|a| a.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|c| collapsed(&c.name))
         .filter(|a| !a.is_empty())
         .collect();
     let (now, then) = (
-        authors::join_display(&file_authors),
-        authors::join_display(&want.authors),
+        credits::join_display(&file_names),
+        credits::join_display(&credits::names(&want.creators)),
     );
-    if now != then && (!want.authors.is_empty() || cleared.authors) {
+    let names_drift = now != then && (!want.creators.is_empty() || cleared.creators);
+    if names_drift {
         push(&mut out, "author", &now, &then);
+    }
+    if format == FileFormat::Epub && !names_drift && roles_drift(&file.creators, &want.creators) {
+        push(
+            &mut out,
+            "role",
+            &credit_list(
+                file.creators
+                    .iter()
+                    .map(|c| (c.name.as_str(), c.roles.as_slice())),
+            ),
+            &credit_list(
+                want.creators
+                    .iter()
+                    .map(|c| (c.name.as_str(), c.roles.as_slice())),
+            ),
+        );
     }
     if format == FileFormat::Pdf {
         return out;
@@ -463,13 +583,23 @@ fn patched(
             .find(|d| d.field == field)
             .map(|d| d.row.clone())
     };
-    let authors = row("author").map(|_| want.authors.clone());
+    let authors = row("author").map(|_| credits::names(&want.creators));
+    let creators = (row("author").is_some() || row("role").is_some()).then(|| {
+        want.creators
+            .iter()
+            .map(|c| bokai::Contributor {
+                name: c.name.clone(),
+                file_as: None,
+                roles: c.roles.clone(),
+            })
+            .collect()
+    });
     Ok(match format {
         FileFormat::Epub => epub_meta::edit_metadata(
             bytes,
             &epub_meta::MetadataPatch {
                 title: row("title"),
-                authors,
+                creators,
                 language: row("language"),
                 publisher: row("publisher"),
                 date: row("date"),
@@ -537,6 +667,7 @@ pub fn patch_from(book: &BookRow) -> MetadataPatch {
     MetadataPatch {
         title: book.title.clone(),
         author: book.author.clone(),
+        credits: None,
         language: book.language.clone(),
         ppd: book.ppd.clone(),
         writing_mode: book.writing_mode.clone(),
@@ -626,6 +757,7 @@ mod tests {
         MetadataPatch {
             title: "  A Title  ".into(),
             author: "Writer, Ann & bob maker".into(),
+            credits: None,
             language: "en-US".into(),
             ppd: None,
             writing_mode: None,
@@ -653,7 +785,7 @@ mod tests {
                     &db::NewBook {
                         sha256: title,
                         title,
-                        author: "",
+                        credits: &[],
                         language: "en",
                         ppd: None,
                         epub_path: None,
@@ -708,7 +840,7 @@ mod tests {
     #[test]
     fn a_full_patch_is_canonicalized() {
         let mut p = patch();
-        normalize(&mut p).unwrap();
+        normalize(&mut p, &[]).unwrap();
         assert_eq!(p.title, "A Title");
         assert_eq!(p.author, "Ann Writer & bob maker");
         assert_eq!(p.language, "en");
@@ -728,7 +860,7 @@ mod tests {
         let mut p = patch();
         p.writing_mode = Some("VERTICAL_RL".into());
         p.ppd = Some("ltr".into());
-        normalize(&mut p).unwrap();
+        normalize(&mut p, &[]).unwrap();
         assert_eq!(p.writing_mode.as_deref(), Some("vertical-rl"));
         assert_eq!(
             p.ppd.as_deref(),
@@ -748,7 +880,7 @@ mod tests {
     fn an_empty_title_is_refused() {
         let mut p = patch();
         p.title = "   ".into();
-        assert!(normalize(&mut p).is_err());
+        assert!(normalize(&mut p, &[]).is_err());
     }
 
     #[test]
@@ -756,7 +888,7 @@ mod tests {
         let mut p = patch();
         p.series_name = Some("Saga".into());
         p.series_index = Some(-1.0);
-        assert!(normalize(&mut p).is_err());
+        assert!(normalize(&mut p, &[]).is_err());
     }
 
     #[test]
@@ -778,7 +910,10 @@ mod tests {
     fn stated_as(title: &str, authors: &[&str], language: &str) -> bokai::Metadata {
         bokai::Metadata {
             title: title.into(),
-            authors: authors.iter().map(|a| a.to_string()).collect(),
+            creators: authors
+                .iter()
+                .map(|a| bokai::Contributor::named(*a))
+                .collect(),
             language: language.into(),
             ..Default::default()
         }
@@ -787,7 +922,7 @@ mod tests {
     fn wanted(title: &str, authors: &[&str], language: &str) -> FileMetadata {
         FileMetadata {
             title: title.into(),
-            authors: authors.iter().map(|a| a.to_string()).collect(),
+            creators: authors.iter().map(|a| Credit::named(*a)).collect(),
             language: language.into(),
             ..Default::default()
         }
@@ -841,7 +976,7 @@ mod tests {
         let want = wanted("T", &[], "");
         assert!(drift(FileFormat::Epub, &file, &want, Cleared::default()).is_empty());
         let cleared = Cleared {
-            authors: true,
+            creators: true,
             publisher: true,
             date: true,
         };
@@ -865,6 +1000,62 @@ mod tests {
         let mut want = wanted("T", &["A"], "en");
         want.publisher = Some("Acme".into());
         assert!(drift(FileFormat::Pdf, &file, &want, Cleared::default()).is_empty());
+    }
+
+    #[test]
+    fn only_an_epub_drifts_on_a_role_and_only_on_one_the_row_claims() {
+        let file = stated_as("T", &["Ann Writer", "Ivy Drawer"], "en");
+        let mut want = wanted("T", &["Ann Writer", "Ivy Drawer"], "en");
+        assert!(
+            drift(FileFormat::Epub, &file, &want, Cleared::default()).is_empty(),
+            "a credit stating no role claims none"
+        );
+        want.creators[0].roles = vec!["aut".into()];
+        assert!(
+            drift(FileFormat::Epub, &file, &want, Cleared::default()).is_empty(),
+            "a creator stating no role reads as an author"
+        );
+        want.creators[1].roles = vec!["ill".into()];
+        assert_eq!(
+            drift(FileFormat::Epub, &file, &want, Cleared::default()),
+            [Drift {
+                field: "role",
+                file: "Ann Writer; Ivy Drawer".into(),
+                row: "Ann Writer (aut); Ivy Drawer (ill)".into(),
+            }]
+        );
+        for format in [FileFormat::Kfx, FileFormat::Pdf] {
+            assert!(
+                drift(format, &file, &want, Cleared::default()).is_empty(),
+                "{format:?} states no roles"
+            );
+        }
+        let packed = stated_as("T", &["Ann Writer & Ivy Drawer"], "en");
+        assert_eq!(
+            drift(FileFormat::Epub, &packed, &want, Cleared::default())
+                .iter()
+                .map(|d| d.field)
+                .collect::<Vec<_>>(),
+            ["role"],
+            "a role the packing creator does not state takes the row's credits into the file"
+        );
+
+        let mut packed_editors = stated_as("T", &["春野一郎、秋山次郎"], "ja");
+        packed_editors.creators[0].roles = vec!["edt".into()];
+        let mut as_read = wanted("T", &["春野一郎", "秋山次郎"], "ja");
+        for c in &mut as_read.creators {
+            c.roles = vec!["edt".into()];
+        }
+        assert!(
+            drift(
+                FileFormat::Epub,
+                &packed_editors,
+                &as_read,
+                Cleared::default()
+            )
+            .is_empty(),
+            "credits read out of one packing creator agree with it"
+        );
     }
 
     fn epub(creator: &str) -> Vec<u8> {
@@ -952,11 +1143,15 @@ mod tests {
         let book = db::get_book(&conn, id).unwrap().unwrap();
         assert_eq!(book.author, "Jane Doe");
         let source = metadata_of(book.epub_path.as_deref().unwrap(), bokai::Format::Epub);
-        assert_eq!(source.authors, ["Jane Doe"]);
-        assert_eq!(source.author_sorts, ["Doe, Jane"], "the sort key stays");
+        assert_eq!(source.creator_names(), ["Jane Doe"]);
+        assert_eq!(
+            source.creator_sort_keys(),
+            ["Doe, Jane"],
+            "the sort key stays"
+        );
         assert_eq!(source.language, "en-US", "an agreeing tag is left alone");
         let kfx = metadata_of(book.kfx_path.as_deref().unwrap(), bokai::Format::Kfx);
-        assert_eq!(kfx.authors, ["Jane Doe"]);
+        assert_eq!(kfx.creator_names(), ["Jane Doe"]);
     }
 
     #[test]
@@ -985,7 +1180,7 @@ mod tests {
         ] {
             let m = metadata_of(path, format);
             assert_eq!(m.title, "Sprocket Tales, Revised");
-            assert_eq!(m.authors, ["Ann Writer", "Bob Maker"]);
+            assert_eq!(m.creator_names(), ["Ann Writer", "Bob Maker"]);
             assert_eq!(m.publisher, None, "the cleared publisher left the file");
         }
 
@@ -1020,6 +1215,15 @@ mod tests {
         assert!(!single.reaches_files);
         assert!(single.bake().is_empty());
 
+        let mut patch = patch_from(&single.row);
+        patch.tags = vec!["shelf".into(), "again".into()];
+        patch.credits = Some(vec![Credit::with_roles("Jane Doe", &["aut"])]);
+        let stated = edit_row(&conn, &paths, id, patch).unwrap();
+        assert!(
+            !stated.reaches_files,
+            "stating `aut` for an author that stated no role changes no file"
+        );
+
         let edited = edit_rows(
             &conn,
             &paths,
@@ -1032,6 +1236,221 @@ mod tests {
         .unwrap();
         assert!(!edited[0].reaches_files);
         assert!(edited[0].bake().is_empty());
+    }
+
+    const TWO_CREATORS: &str = r#"<dc:creator opf:role="aut">Ann Writer</dc:creator>
+    <dc:creator>Ivy Drawer</dc:creator>"#;
+
+    #[test]
+    fn an_import_reads_each_creator_s_roles() {
+        let (_tmp, conn, _paths, id) = library_with_a_converted_epub(
+            r#"<dc:creator opf:role="aut">Ann Writer</dc:creator>
+    <dc:creator opf:role="ill">Ivy Drawer</dc:creator>"#,
+        );
+        let book = db::get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(
+            book.credits,
+            [
+                Credit::with_roles("Ann Writer", &["aut"]),
+                Credit::with_roles("Ivy Drawer", &["ill"]),
+            ]
+        );
+        assert_eq!(
+            book.author, "Ann Writer",
+            "the author line names the author alone"
+        );
+        let kfx = metadata_of(book.kfx_path.as_deref().unwrap(), bokai::Format::Kfx);
+        assert_eq!(
+            kfx.creator_names(),
+            ["Ann Writer", "Ivy Drawer"],
+            "a KFX states no roles, so it names every creator"
+        );
+    }
+
+    #[test]
+    fn a_role_edit_reaches_the_epub_and_leaves_the_kfx_alone() {
+        let (_tmp, conn, paths, id) = library_with_a_converted_epub(TWO_CREATORS);
+        let before = db::get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(before.author, "Ann Writer & Ivy Drawer");
+        let kfx_before = std::fs::read(before.kfx_path.as_deref().unwrap()).unwrap();
+
+        let mut patch = patch_from(&before);
+        patch.credits = Some(vec![
+            Credit::with_roles("Ann Writer", &["aut"]),
+            Credit::with_roles("Ivy Drawer", &["ill"]),
+        ]);
+        let edited = edit_row(&conn, &paths, id, patch).unwrap();
+        assert!(edited.reaches_files);
+        assert_eq!(edited.row.author, "Ann Writer");
+        let reports = edited.bake();
+        let written: Vec<FileFormat> = reports
+            .iter()
+            .filter(|r| r.written)
+            .map(|r| r.format)
+            .collect();
+        assert_eq!(written, [FileFormat::Epub], "{reports:?}");
+
+        let epub = metadata_of(
+            edited.row.epub_path.as_deref().unwrap(),
+            bokai::Format::Epub,
+        );
+        let roles: Vec<(String, Vec<String>)> = epub
+            .creators
+            .into_iter()
+            .map(|c| (c.name, c.roles))
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                ("Ann Writer".to_string(), vec!["aut".to_string()]),
+                ("Ivy Drawer".to_string(), vec!["ill".to_string()]),
+            ]
+        );
+        assert_eq!(
+            std::fs::read(edited.row.kfx_path.as_deref().unwrap()).unwrap(),
+            kfx_before,
+            "the KFX names the same creators and is left byte for byte"
+        );
+        assert!(
+            bake(
+                &edited.row,
+                &FileMetadata::of(&edited.row),
+                Cleared::default(),
+                true
+            )
+            .iter()
+            .all(|r| r.drift.is_empty() && !r.written),
+            "a second pass finds nothing to write"
+        );
+    }
+
+    #[test]
+    fn an_author_line_edit_keeps_every_other_credit() {
+        let (_tmp, conn, paths, id) = library_with_a_converted_epub(TWO_CREATORS);
+        let mut patch = patch_from(&db::get_book(&conn, id).unwrap().unwrap());
+        patch.credits = Some(vec![
+            Credit::named("Ann Writer"),
+            Credit::with_roles("Ivy Drawer", &["ill"]),
+        ]);
+        edit_row(&conn, &paths, id, patch).unwrap().bake();
+
+        let mut patch = patch_from(&db::get_book(&conn, id).unwrap().unwrap());
+        patch.author = "Ann Writer & Bo Cowriter".into();
+        let row = edit_row(&conn, &paths, id, patch).unwrap().row;
+        assert_eq!(
+            row.credits,
+            [
+                Credit::named("Ann Writer"),
+                Credit::named("Bo Cowriter"),
+                Credit::with_roles("Ivy Drawer", &["ill"]),
+            ]
+        );
+        assert_eq!(row.author, "Ann Writer & Bo Cowriter");
+    }
+
+    #[test]
+    fn an_unchanged_author_line_never_splits_a_credit() {
+        let (_tmp, conn, paths, id) =
+            library_with_a_converted_epub("<dc:creator>Smith &amp; Jones</dc:creator>");
+        let before = db::get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(before.credits, [Credit::named("Smith & Jones")]);
+        let mut patch = patch_from(&before);
+        patch.title = "Retitled".into();
+        let edited = edit_row(&conn, &paths, id, patch).unwrap();
+        assert_eq!(edited.row.credits, before.credits);
+        let reports = edited.bake();
+        assert!(reports.iter().all(|r| r.error.is_none()), "{reports:?}");
+        let epub = metadata_of(
+            edited.row.epub_path.as_deref().unwrap(),
+            bokai::Format::Epub,
+        );
+        assert_eq!(epub.creator_names(), ["Smith & Jones"]);
+    }
+
+    #[test]
+    fn a_bulk_assignment_gives_a_role_and_renders_the_new_author_line() {
+        let (_tmp, conn, paths, id) = library_with_a_converted_epub(TWO_CREATORS);
+        let edited = edit_rows(
+            &conn,
+            &paths,
+            &[id],
+            BulkMetadataPatch {
+                credits: vec![Credit::with_roles("Ivy Drawer", &["ILL"])],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let row = &edited[0].row;
+        assert_eq!(row.author, "Ann Writer");
+        assert_eq!(row.credits[1], Credit::with_roles("Ivy Drawer", &["ill"]));
+        assert_eq!(
+            row.author_romaji,
+            romaji::romanize_field("Ann Writer", None, "en")
+        );
+        assert!(edited[0].reaches_files);
+        let reports = edited[0].bake();
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.format == FileFormat::Epub && r.written),
+            "{reports:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_from_before_roles_takes_them_from_its_epub() {
+        let (_tmp, conn, paths, id) = library_with_a_converted_epub(
+            r#"<dc:creator opf:role="ill">Ivy Drawer</dc:creator>
+    <dc:creator opf:role="aut">Ann Writer</dc:creator>"#,
+        );
+        db::set_credits(
+            &conn,
+            id,
+            &[Credit::named("Ivy Drawer"), Credit::named("Ann Writer")],
+        )
+        .unwrap();
+        let before = rename::rename_book_files(&conn, &paths, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.author, "Ivy Drawer & Ann Writer");
+        assert!(
+            before
+                .epub_path
+                .as_deref()
+                .unwrap()
+                .contains("[Ivy Drawer]")
+        );
+
+        let from_file = credits_from_epub(&before)
+            .unwrap()
+            .expect("the file says more");
+        assert_eq!(from_file[0], Credit::with_roles("Ivy Drawer", &["ill"]));
+        let after = adopt_credits(&conn, &paths, id, &from_file).unwrap();
+        assert_eq!(after.author, "Ann Writer");
+        assert!(
+            after.epub_path.as_deref().unwrap().contains("[Ann Writer]"),
+            "the files are named for the first author: {:?}",
+            after.epub_path
+        );
+        assert_eq!(
+            credits_from_epub(&after).unwrap(),
+            None,
+            "nothing left to adopt"
+        );
+        assert!(
+            bake(&after, &FileMetadata::of(&after), Cleared::default(), false)
+                .iter()
+                .all(|r| r.drift.is_empty()),
+            "the row now agrees with its files"
+        );
+
+        db::set_credits(&conn, id, &[Credit::named("Someone Else")]).unwrap();
+        let other = db::get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(
+            credits_from_epub(&other).unwrap(),
+            None,
+            "a file naming other people is not the row's to read from"
+        );
     }
 
     #[test]

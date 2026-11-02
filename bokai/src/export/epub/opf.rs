@@ -1,26 +1,23 @@
 //! Shared `content.opf` (OPF package document) emitter.
 
-use crate::model::{LandmarkType, OrientationLock};
+use crate::model::{LandmarkType, Metadata, OrientationLock};
 
 /// One `<dc:creator>` / `<dc:contributor>` with optional refinements.
 pub struct OpfCreator {
     pub name: String,
-    /// MARC relator code (`aut`, `trl`, …) for the `role` refinement.
-    pub role: Option<String>,
+    /// MARC relator codes (`aut`, `trl`, …), one `role` refinement each.
+    pub roles: Vec<String>,
     /// Sort key for the `file-as` refinement.
     pub file_as: Option<String>,
 }
 
-/// Per-creator `file-as` values, one per author.
-pub fn creator_file_as_keys(authors: &[String], author_sorts: &[String]) -> Vec<String> {
-    let joined = authors.join(" & ");
-    (0..authors.len())
-        .map(|i| {
-            author_sorts
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| joined.clone())
-        })
+/// Per-creator `file-as` values, one per creator: its positional sort key, else
+/// every creator's name joined with ` & `.
+pub fn creator_file_as_keys(md: &Metadata) -> Vec<String> {
+    let joined = md.creator_names().join(" & ");
+    let keys = md.creator_sort_keys();
+    (0..md.creators.len())
+        .map(|i| keys.get(i).cloned().unwrap_or_else(|| joined.clone()))
         .collect()
 }
 
@@ -35,23 +32,19 @@ pub struct OpfCollection {
 /// switches the package to FXL: the `rendition:` vocabulary is declared on
 /// `<package>` and the pre-paginated layout metas are emitted.
 pub struct OpfFixedLayout {
-    /// `rendition:spread` value (e.g. `landscape`), when the source declares
-    /// a spread preference.
+    /// `rendition:spread` value (e.g. `landscape`) the source declares.
     pub rendition_spread: Option<String>,
-    /// EBPAJ `fixed-layout-jp:viewport` twin of `original-resolution`,
-    /// emitted for Japanese fixed-layout sources that carried it.
+    /// EBPAJ `fixed-layout-jp:viewport` twin of `original-resolution`, for a Japanese source.
     pub ebpaj_viewport: Option<(u32, u32)>,
     /// Page pixel size for `original-resolution`.
     pub original_resolution: Option<(u32, u32)>,
-    /// `OrientationLock` the source declared, emitted as both
-    /// `rendition:orientation` and `orientation-lock`.
+    /// `OrientationLock` the source declared, as `rendition:orientation` and `orientation-lock`.
     pub orientation_lock: Option<OrientationLock>,
     /// `book-type` OPF hint — `"comic"` for double-page-spread manga.
     pub book_type: Option<String>,
 }
 
-/// The `<metadata>` block. Optional fields are omitted entirely when absent,
-/// so a caller that populates only the core set gets the minimal document.
+/// The `<metadata>` block; an optional field left absent is not emitted.
 pub struct OpfMetadata {
     /// Falls back to `"Untitled"` when empty.
     pub title: String,
@@ -61,32 +54,25 @@ pub struct OpfMetadata {
     pub contributors: Vec<OpfCreator>,
     /// Falls back to `"en"` when empty.
     pub language: String,
-    /// Primary unique identifier (`id="BookId"`). Falls back to the nil-UUID
-    /// URN when empty.
+    /// Primary unique identifier (`id="BookId"`), the nil-UUID URN when empty.
     pub identifier: String,
     /// Amazon catalogue id, emitted as `<dc:identifier id="asin">`.
     pub asin: Option<String>,
-    /// `dcterms:modified` value — the caller stamps the conversion time.
+    /// `dcterms:modified` value: the conversion time.
     pub modified: String,
     /// `<dc:date>`, pre-formatted by the caller (see [`format_opf_date`]).
     pub date: Option<String>,
-    /// Trimmed before emission; whitespace-only publishers are dropped (an
-    /// empty `<dc:publisher>` is invalid OPF).
+    /// Trimmed; a whitespace-only one is not emitted, an empty `<dc:publisher>` being invalid.
     pub publisher: Option<String>,
     pub description: Option<String>,
     pub subjects: Vec<String>,
     pub rights: Option<String>,
     pub collection: Option<OpfCollection>,
-    /// Manifest id of the cover image, for the EPUB-2-compat
-    /// `<meta name="cover">` (the manifest item itself carries
-    /// `properties="cover-image"` — the caller sets that).
+    /// Manifest id of the cover image, for EPUB 2's `<meta name="cover">`.
     pub cover_manifest_id: Option<String>,
-    /// Kindle `primary-writing-mode` hint, resolved by
-    /// `primary_writing_mode`; `horizontal-lr` is the default, passed as
-    /// `None`.
+    /// Kindle `primary-writing-mode` hint; `None` for the default `horizontal-lr`.
     pub primary_writing_mode: Option<String>,
-    /// Spine `page-progression-direction`. `ltr` (the EPUB default) is
-    /// suppressed at emission.
+    /// Spine `page-progression-direction`; `ltr`, the EPUB default, is not emitted.
     pub page_progression_direction: Option<String>,
     pub fixed_layout: Option<OpfFixedLayout>,
 }
@@ -107,7 +93,7 @@ pub struct OpfItemref {
     pub properties: Option<String>,
 }
 
-/// One `<guide>` reference (EPUB 2.0 landmarks, read by Apple Books / Kindle /
+/// One `<guide>` reference: an EPUB 2.0 landmark.
 #[derive(Debug, Clone)]
 pub struct OpfGuideRef {
     pub guide_type: String,
@@ -266,8 +252,7 @@ pub fn emit_opf(pkg: &OpfPackage) -> String {
         }
     }
 
-    // Cover meta (EPUB2-compat; kept alongside `properties="cover-image"`
-    // on the manifest item — most readers honour either, calibre emits both).
+    // Cover meta, EPUB 2's twin of the manifest item's `properties="cover-image"`.
     if let Some(cover_id) = m.cover_manifest_id.as_deref() {
         s.push_str(&format!(
             "    <meta name=\"cover\" content=\"{}\"/>\n",
@@ -342,7 +327,7 @@ pub fn emit_opf(pkg: &OpfPackage) -> String {
     }
     s.push_str("  </manifest>\n");
 
-    // `ltr` is the EPUB default; calibre suppresses the attribute for it.
+    // `ltr` is the EPUB default and goes unstated.
     let ppd_attr = m
         .page_progression_direction
         .as_deref()
@@ -382,7 +367,7 @@ pub fn emit_opf(pkg: &OpfPackage) -> String {
 }
 
 fn push_person_refines(s: &mut String, cid: &str, c: &OpfCreator) {
-    if let Some(role) = c.role.as_deref() {
+    for role in &c.roles {
         s.push_str(&format!(
             "    <meta refines=\"#{}\" property=\"role\" scheme=\"marc:relators\">{}</meta>\n",
             cid,
@@ -450,8 +435,8 @@ pub fn xhtml_content_properties(xml: &str) -> Vec<&'static str> {
     props
 }
 
-/// True if `xml` contains a real element `<name…>` (open tag). Matches
-/// `<name` followed by a tag delimiter so `<svgfoo` doesn't count.
+/// True if `xml` contains a real element `<name…>`: `<name` followed by a tag
+/// delimiter, not `<svgfoo`.
 fn contains_element(xml: &str, name: &str) -> bool {
     let needle = format!("<{name}");
     let mut hay = xml;
@@ -469,9 +454,8 @@ fn contains_element(xml: &str, name: &str) -> bool {
     false
 }
 
-/// Format a source publication date for `<dc:date>`: a bare `YYYY-MM-DD`
-/// (the KFX `issue_date` form) gains a UTC midnight time to match calibre's
-/// ISO-8601 output; anything else passes through unchanged.
+/// Format a source publication date for `<dc:date>`: a bare `YYYY-MM-DD` (the KFX
+/// `issue_date` form) gains a UTC midnight time; anything else passes through.
 fn w3cdtf_t_separator(date: &str) -> String {
     let b = date.as_bytes();
     if b.len() > 10
@@ -602,7 +586,7 @@ mod tests {
                 title_file_as: Some("こくしかんさつじんじけん".to_string()),
                 creators: vec![OpfCreator {
                     name: "小栗 虫太郎".to_string(),
-                    role: Some("aut".to_string()),
+                    roles: vec!["aut".to_string()],
                     file_as: Some("おぐり むしたろう".to_string()),
                 }],
                 language: "ja".to_string(),
@@ -670,8 +654,7 @@ mod tests {
 \x20 </guide>\n\
 </package>\n";
         assert_eq!(opf, expected);
-        // Whitespace-only publisher is dropped, empty title/language/id
-        // defaults are only used when the fields are empty (they weren't).
+        // `publisher: Some("  ")` is not emitted.
         assert!(!opf.contains("dc:publisher"));
     }
 

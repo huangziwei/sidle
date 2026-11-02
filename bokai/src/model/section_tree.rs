@@ -1,6 +1,5 @@
-//! Section tree extraction from book IR.
-//!
-//! Transforms bokai's flat IR tree (where headings are siblings of paragraphs)
+//! Section tree extraction from book IR: the flat IR tree, where headings are
+//! siblings of paragraphs, nested into sections.
 
 use std::io;
 
@@ -87,8 +86,8 @@ pub fn extract_section_tree(book: &mut Book) -> io::Result<SectionTree> {
     let (preamble, sections) = nest_events(&events);
 
     Ok(SectionTree {
+        authors: meta.creator_names(),
         title: meta.title,
-        authors: meta.authors,
         language: meta.language,
         preamble,
         sections,

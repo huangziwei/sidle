@@ -1740,7 +1740,7 @@ const view = () => $("#editor-view");
 // --- open / close ----------------------------------------------------------
 
 async function open(bookId) {
-  if (!close()) return; // tear down any prior session (aborts if user keeps edits)
+  if (!close()) return; // tear down any prior session, stopping where its edits are kept
   let data;
   try {
     data = await window.api.invoke("editor_open", { bookId });
@@ -1762,7 +1762,7 @@ async function open(bookId) {
   requestAnimationFrame(() => $("#editor-center input")?.focus());
 }
 
-// Returns true if the editor is closed, false if the user kept unsaved edits.
+// `true` once the editor is closed, `false` when unsaved edits were kept.
 function close() {
   if (!session) return true;
   if (session.dirty && !confirm("Discard unsaved changes?")) return false;
@@ -1948,6 +1948,7 @@ function renderMetadataPanel() {
       <span>Authors</span>
       <input name="author" placeholder="Jane Smith & John Doe" ${editable ? "" : "readonly"} />
     </label>
+    <small class="field-hint" id="editor-other-credits" hidden></small>
 
     <div class="field-group-title">Publication</div>
     <div class="field-row">
@@ -1987,6 +1988,13 @@ function renderMetadataPanel() {
 
   form.elements.title.value = m.title || "";
   form.elements.author.value = m.author || "";
+  // The other credits stay as they are on save; the library's editor sets their roles.
+  const others = (m.credits || []).filter((c) => !window.isAuthorCredit(c));
+  const othersHint = form.querySelector("#editor-other-credits");
+  othersHint.hidden = others.length === 0;
+  othersHint.textContent = others.length
+    ? `Also credited: ${others.map((c) => `${c.name} (${c.roles.map(window.roleLabel).join(", ")})`).join("; ")}`
+    : "";
   form.elements.publisher.value = m.publisher || "";
   form.elements.published_at.value = m.published_at || "";
   form.elements.language.value = m.language || "";
@@ -2033,6 +2041,7 @@ async function saveMetadata() {
     session.data.metadata = {
       title: row.title,
       author: row.author,
+      credits: row.credits,
       language: row.language,
       publisher: row.publisher,
       published_at: row.published_at,
@@ -3107,8 +3116,7 @@ function renderSpineList(focusIndex = -1) {
   }
 }
 
-// One row: the document's name (not editable — a document's identity isn't a
-// label the reader gets to change) and the two controls that move it.
+// One row: the document's name, read-only, and the two controls that move it.
 function spineRow(doc, ops) {
   const row = el("div", "toc-row");
   const name = el("span", doc.named ? "spine-label" : "spine-label spine-unnamed", doc.label);

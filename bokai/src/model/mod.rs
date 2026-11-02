@@ -17,10 +17,10 @@ mod semantic;
 mod text;
 pub mod toc_shape;
 
-pub(crate) use book::sort_key_survives;
 pub use book::{
     Book, CollectionInfo, Contributor, Format, Landmark, LandmarkType, Metadata, OrientationLock,
-    PageSpread, Panel, PanelRect, PeriodicalKind, Resource, TocEntry,
+    PageSpread, Panel, PanelRect, PeriodicalKind, Resource, TocEntry, roles_agree,
+    sort_key_survives,
 };
 
 pub use chapter::{Chapter, ChapterId, ChapterSummary, ChildIter, DfsIter};
