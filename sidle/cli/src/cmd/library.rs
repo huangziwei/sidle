@@ -101,7 +101,7 @@ pub fn list(ctx: &Ctx, select: &Select, field: Option<&str>) -> Result<()> {
     })
 }
 
-/// One value per book, for feeding the next command in a pipeline.
+/// `book`'s value of the column `field` names.
 fn one_field(book: &BookRow, field: &str) -> Result<String> {
     let path = |p: &Option<String>| p.clone().unwrap_or_default();
     Ok(match field {
@@ -194,8 +194,7 @@ fn kind(book: &BookRow) -> &str {
     book.kind.as_deref().unwrap_or("no conversion")
 }
 
-/// True when the file's own key is a catalogue ASIN, which means the device
-/// cannot tell this copy from the store's.
+/// True when the file's own key is a catalogue ASIN.
 fn shares_a_catalogue_id(book: &BookRow) -> bool {
     book.kfx_path.is_some()
         && book
@@ -341,11 +340,12 @@ pub struct SetArgs {
     #[command(flatten)]
     select: Select,
 
-    /// Title. Refused for a multi-book selection — a title is per book.
+    /// Title. Refused for a multi-book selection.
     #[arg(long)]
     title: Option<String>,
-    /// Author(s). Split on `&` or `、`; Western names are flipped to natural
-    /// order and re-joined. Replaces the authors; other credits stay.
+    /// Author(s). Split on `&`, `、`, or a comma between Han or Hangul names;
+    /// Western names are flipped to natural order and re-joined. Replaces the
+    /// authors; other credits stay.
     #[arg(long)]
     author: Option<String>,
     /// Give a person a role, crediting them where they are not: `ROLE:NAME` with
@@ -420,9 +420,8 @@ pub fn set(ctx: &Ctx, args: SetArgs) -> Result<()> {
 
     let updated = {
         let conn = ctx.conn();
-        // A single book with a title edit is a full-replacement patch (the only
-        // shape that can rewrite one); everything else is the sparse bulk patch,
-        // which leaves untouched fields alone.
+        // A single book with a title edit takes the full-replacement patch; every
+        // other edit takes the sparse bulk patch, which leaves untouched fields alone.
         if let Some(title) = args.title.clone() {
             let mut patch = metadata::patch_from(&books[0]);
             patch.title = title;
@@ -527,9 +526,7 @@ pub fn asin(ctx: &Ctx, select: &Select, asin: &str) -> Result<()> {
 /// The formats an import can read, as `books.source_format` records them.
 const SOURCE_FORMATS: &[&str] = &["azw3", "mobi", "epub", "kfx", "kfx-zip", "pdf", "aozora"];
 
-/// Record what the selected books arrived as. Provenance, not metadata: a
-/// `.azw3` import stores the EPUB it exported, and `conversion_jobs.kind`
-/// names the direction a reconvert takes from there.
+/// Record what the selected books arrived as, in `books.source_format`.
 pub fn source_format(ctx: &Ctx, select: &Select, format: &str) -> Result<()> {
     if !SOURCE_FORMATS.contains(&format) {
         anyhow::bail!(
@@ -550,9 +547,8 @@ pub fn source_format(ctx: &Ctx, select: &Select, format: &str) -> Result<()> {
     })
 }
 
-/// Re-key every KFX whose baked identity is a catalogue ASIN. `kfx_sha256`
-/// stays put — it is the `<sha8>` in the on-device filename each `.sdr` binds
-/// to — and the rewrite moves the mtime the picker's update pass watches.
+/// Re-key every KFX whose baked identity is a catalogue ASIN, keeping each
+/// book's `kfx_sha256`.
 pub fn rekey(ctx: &Ctx, apply: bool) -> Result<()> {
     let conn = ctx.conn();
     let books = db::list_books(&conn).context("read the library")?;
@@ -822,6 +818,76 @@ pub fn credits(ctx: &Ctx, select: &Select, apply: bool) -> Result<()> {
     })
 }
 
+#[derive(clap::Subcommand)]
+pub enum PeopleCmd {
+    /// Link NAMEs as one person, together with every name linked to any of them.
+    /// The first is the name the person sorts under.
+    Link {
+        #[arg(required = true, num_args = 2.., value_name = "NAME")]
+        names: Vec<String>,
+    },
+    /// Unlink each NAME from the person it belongs to.
+    Unlink {
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
+    },
+}
+
+/// One name of a person, and how many books credit it.
+#[derive(Serialize)]
+struct PersonName {
+    name: String,
+    books: usize,
+}
+
+/// Link or unlink names as `action` says, then list every person.
+pub fn people(ctx: &Ctx, action: Option<PeopleCmd>) -> Result<()> {
+    let canonical = |names: Vec<String>| -> Vec<String> {
+        names
+            .iter()
+            .map(|n| credits::normalize_display(n))
+            .filter(|n| !n.is_empty())
+            .collect()
+    };
+    let conn = ctx.conn();
+    match action {
+        Some(PeopleCmd::Link { names }) => db::link_names(&conn, &canonical(names))?,
+        Some(PeopleCmd::Unlink { names }) => db::unlink_names(&conn, &canonical(names))?,
+        None => {}
+    }
+
+    let mut credited: std::collections::HashMap<String, usize> = Default::default();
+    for book in db::list_books(&conn)? {
+        for name in credits::names(&book.credits) {
+            *credited.entry(name).or_default() += 1;
+        }
+    }
+    let people: Vec<Vec<PersonName>> = db::list_people(&conn)?
+        .into_iter()
+        .map(|names| {
+            names
+                .into_iter()
+                .map(|name| PersonName {
+                    books: credited.get(&name).copied().unwrap_or(0),
+                    name,
+                })
+                .collect()
+        })
+        .collect();
+    ctx.report(&people, || {
+        for person in &people {
+            let names: Vec<String> = person
+                .iter()
+                .map(|n| format!("{} ({})", n.name, n.books))
+                .collect();
+            println!("{}", names.join(" / "));
+        }
+        if people.is_empty() {
+            println!("No names are linked.");
+        }
+    })
+}
+
 #[derive(Args)]
 pub struct CoverArgs {
     #[command(flatten)]
@@ -1014,7 +1080,7 @@ pub fn split(ctx: &Ctx, args: SplitArgs) -> Result<()> {
 
     let volumes = omnibus::carve_volumes(book, &plan)?;
     // The connection is taken for the writes and released before the sweep at
-    // the end: its workers borrow the same one.
+    // the end.
     let outcomes = {
         let conn = ctx.conn();
         omnibus::add_volumes(&conn, &ctx.paths, book, &plan, volumes, |n, title| {

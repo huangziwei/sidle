@@ -57,6 +57,7 @@ mod tests {
             kfx_sha256: None,
             device_filename: None,
             author: author.into(),
+            author_people: Vec::new(),
             language: String::new(),
             publisher: None,
             series_name: None,

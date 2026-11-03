@@ -127,7 +127,7 @@ pub fn record(conn: &Connection, book: &BookRow, produced: Produced) -> anyhow::
     if let Some(kfx) = &produced.kfx_path {
         let kfx_str = kfx.to_string_lossy();
         match book.kfx_sha256.as_deref() {
-            // `kfx_sha256` is frozen: the on-device filename embeds its `<sha8>`.
+            // An existing `kfx_sha256` is kept as it stands.
             Some(sha) => db::set_kfx_path_and_sha(conn, book_id, &kfx_str, sha)?,
             None => {
                 let sha = sha256_of_file(kfx)?;
@@ -328,7 +328,7 @@ fn convert_kfx_to_epub(
     on_progress("load", 0, 1, "Reading KFX");
     let mut handle = bokai::Book::open_format(source_path, bokai::Format::Kfx)
         .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load {}): {e}", source_path.display()))?;
-    // The row's credits restate the creators: a KFX states no roles.
+    // `descriptive_override` restates the creators as the row's credits, roles included.
     handle.set_metadata_override(descriptive_override(handle.metadata(), book));
     let mut writer = File::create(&tmp_path)
         .map_err(|e| anyhow::anyhow!("create {}: {e}", tmp_path.display()))?;
@@ -638,6 +638,7 @@ mod tests {
             title: title.into(),
             author: author.into(),
             credits: crate::library::credits::from_author_line(author),
+            author_people: Vec::new(),
             title_romaji: String::new(),
             author_romaji: String::new(),
             search_key: String::new(),

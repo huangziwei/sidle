@@ -51,8 +51,8 @@ enum Command {
     List {
         #[command(flatten)]
         select: Select,
-        /// Print one column: `id`, `sha`, `title`, `path`,
-        /// `kfx`, `epub`, `pdf`, `asin`. Ideal for feeding another command.
+        /// Print one column: `id`, `sha`, `title`, `path`, `kfx`, `epub`, `pdf`,
+        /// `asin`.
         #[arg(long, value_name = "FIELD")]
         field: Option<String>,
     },
@@ -61,7 +61,7 @@ enum Command {
         #[command(flatten)]
         select: Select,
     },
-    /// Convert the selected books — the sweep after a bokai change.
+    /// Convert the selected books.
     Convert(cmd::convert::ConvertArgs),
     /// Conversion job state, per book.
     Jobs {
@@ -79,8 +79,7 @@ enum Command {
         /// The 10-character catalogue ASIN.
         asin: String,
     },
-    /// Record the format a book arrived in, for rows imported before the
-    /// library kept it.
+    /// Record the format a book arrived in.
     SourceFormat {
         #[command(flatten)]
         select: Select,
@@ -111,7 +110,13 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
-    /// Render romaji for a piece of text, the way the metadata editor does.
+    /// Names linked as one person, such as an author under another script or
+    /// spelling. Without a subcommand, lists every person.
+    People {
+        #[command(subcommand)]
+        action: Option<cmd::library::PeopleCmd>,
+    },
+    /// Render romaji for a piece of text.
     Romanize {
         text: String,
         #[arg(long, default_value = "ja")]
@@ -184,6 +189,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Rekey { apply } => cmd::library::rekey(&ctx, apply),
         Command::Bake { select, apply } => cmd::library::bake(&ctx, &select, apply),
         Command::Credits { select, apply } => cmd::library::credits(&ctx, &select, apply),
+        Command::People { action } => cmd::library::people(&ctx, action),
         Command::Romanize { text, language } => {
             println!(
                 "{}",

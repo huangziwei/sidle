@@ -61,6 +61,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::library::library_list,
+            commands::library::library_link_people,
+            commands::library::library_unlink_people,
             commands::library::library_import,
             commands::library::library_update_metadata,
             commands::library::library_romanize,

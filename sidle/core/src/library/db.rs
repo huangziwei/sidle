@@ -17,6 +17,9 @@ pub struct BookRow {
     pub author: String,
     /// Every credited name in order, each with its roles.
     pub credits: Vec<Credit>,
+    /// **Derived, not a column.** The people the book is by, each as all the names
+    /// linked as that person (see [`credits::author_people`]).
+    pub author_people: Vec<Vec<String>>,
     pub language: String,
     pub ppd: Option<String>,
     /// `horizontal-lr`, `horizontal-rl`, `vertical-rl`, `vertical-lr`, or `None` to derive.
@@ -66,7 +69,7 @@ pub struct BookRow {
 }
 
 /// Schema version [`migrate`] stamps into `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// A borrowable handle to the library database.
 pub trait Access {
@@ -93,8 +96,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    // `WAL` shares this file between `sidle-server` and the desktop app; `busy_timeout`
-    // holds a second writer at the lock past `SQLITE_BUSY`.
+    // `busy_timeout` holds a second writer at the lock past `SQLITE_BUSY`.
     conn.pragma_update(None, "busy_timeout", 5000)?;
     migrate(&conn)?;
     relativize_existing_paths(&conn, path)?;
@@ -637,6 +639,17 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
+    // Credited names linked as one person; `ord` orders a person's names, the first
+    // the one it sorts under.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS person_names (
+            name   TEXT PRIMARY KEY,
+            person INTEGER NOT NULL,
+            ord    INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_person_names_person ON person_names(person);",
+    )?;
+
     // `rekey_annotation_hashes` drops `loc_start` from annotation identity.
     if from_version < 12 {
         // `repair_colors_read_as_notes` rewrites the hashed `note_body`, ahead of the re-key.
@@ -664,9 +677,45 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         drop_reading_log(conn)?;
     }
 
+    if from_version < 28 {
+        unpack_stored_credits(conn)?;
+    }
+
     // `user_version` carries `SCHEMA_VERSION`; `backup` gates a restore on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
+    Ok(())
+}
+
+/// Unpack every stored credit naming several people (see [`credits::unpacked`]) and
+/// redraw the author line, leaving `updated_at` alone.
+fn unpack_stored_credits(conn: &Connection) -> rusqlite::Result<()> {
+    let rows: Vec<(i64, String, String, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, credits, author, COALESCE(author_romaji, ''), language FROM books",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, json, author, romaji, language) in rows {
+        let stored: Vec<Credit> = serde_json::from_str(&json).unwrap_or_default();
+        let fixed = credits::unpacked(&stored);
+        if fixed == stored {
+            continue;
+        }
+        let line = credits::author_line(&fixed);
+        conn.execute(
+            "UPDATE books SET credits = ?1, author = ?2, author_romaji = ?3 WHERE id = ?4",
+            params![
+                credits_json(&fixed)?,
+                line,
+                romaji_of_line(&author, romaji, &line, &language),
+                id
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -946,12 +995,12 @@ pub fn find_by_kfx_sha_prefix(
     conn: &Connection,
     prefix: &str,
 ) -> rusqlite::Result<Option<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     let pattern = format!("{prefix}%");
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX,
         params![pattern],
-        |row| row_to_book(row, root.as_deref()),
+        |row| row_to_book(row, &ctx),
     )
     .optional()
 }
@@ -971,24 +1020,24 @@ pub fn find_by_kfx_filename(
     conn: &Connection,
     filename: &str,
 ) -> rusqlite::Result<Option<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     let pattern = format!("%/{}", like_escape(filename));
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME,
         params![pattern],
-        |row| row_to_book(row, root.as_deref()),
+        |row| row_to_book(row, &ctx),
     )
     .optional()
 }
 
 /// The book whose `kfx_path` leaf is `<stem>.kfx`.
 pub fn find_by_kfx_basename(conn: &Connection, stem: &str) -> rusqlite::Result<Option<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     let pattern = format!("%/{}.kfx", like_escape(stem));
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME,
         params![pattern],
-        |row| row_to_book(row, root.as_deref()),
+        |row| row_to_book(row, &ctx),
     )
     .optional()
 }
@@ -1006,9 +1055,9 @@ pub fn job_in_flight(conn: &Connection, book_id: i64) -> rusqlite::Result<bool> 
 }
 
 pub fn find_by_sha(conn: &Connection, sha: &str) -> rusqlite::Result<Option<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     conn.query_row(SELECT_BOOK_WITH_JOB_BY_SHA, params![sha], |row| {
-        row_to_book(row, root.as_deref())
+        row_to_book(row, &ctx)
     })
     .optional()
 }
@@ -1019,11 +1068,11 @@ pub fn find_in_series(
     name: &str,
     index: f64,
 ) -> rusqlite::Result<Option<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_SERIES_POSITION,
         params![name, index],
-        |row| row_to_book(row, root.as_deref()),
+        |row| row_to_book(row, &ctx),
     )
     .optional()
 }
@@ -1038,9 +1087,9 @@ pub fn others_in_series(conn: &Connection, name: &str, book_id: i64) -> rusqlite
 }
 
 pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     let mut stmt = conn.prepare(SELECT_BOOKS_WITH_JOBS)?;
-    let rows = stmt.query_map([], |row| row_to_book(row, root.as_deref()))?;
+    let rows = stmt.query_map([], |row| row_to_book(row, &ctx))?;
     rows.collect()
 }
 
@@ -1547,6 +1596,92 @@ pub fn set_credits(conn: &Connection, book_id: i64, new: &[Credit]) -> rusqlite:
     Ok(true)
 }
 
+/// Every person with names linked, each as its names in order.
+pub fn list_people(conn: &Connection) -> rusqlite::Result<Vec<Vec<String>>> {
+    let mut stmt = conn.prepare("SELECT person, name FROM person_names ORDER BY person, ord")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut current = None;
+    for row in rows {
+        let (person, name) = row?;
+        if current != Some(person) {
+            out.push(Vec::new());
+            current = Some(person);
+        }
+        if let Some(names) = out.last_mut() {
+            names.push(name);
+        }
+    }
+    Ok(out)
+}
+
+/// Link `names` as one person, together with every name linked to any of them:
+/// `names` lead in the order given, the others follow in theirs. Fewer than two
+/// names in all links nothing.
+pub fn link_names(conn: &Connection, names: &[String]) -> rusqlite::Result<()> {
+    let people = credits::People::new(list_people(conn)?);
+    let mut all: Vec<String> = Vec::new();
+    let linked = names.iter().flat_map(|n| people.names_of(n));
+    for name in names.iter().cloned().chain(linked) {
+        if !name.is_empty() && !all.contains(&name) {
+            all.push(name);
+        }
+    }
+    if all.len() < 2 {
+        return Ok(());
+    }
+    in_savepoint(conn, || {
+        let person: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(person), 0) + 1 FROM person_names",
+            [],
+            |r| r.get(0),
+        )?;
+        for (ord, name) in all.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO person_names (name, person, ord) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET person = excluded.person, ord = excluded.ord",
+                params![name, person, ord as i64],
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// Unlink each of `names` from its person; a person left with one name is linked
+/// to none.
+pub fn unlink_names(conn: &Connection, names: &[String]) -> rusqlite::Result<()> {
+    in_savepoint(conn, || {
+        for name in names {
+            conn.execute("DELETE FROM person_names WHERE name = ?1", params![name])?;
+        }
+        conn.execute(
+            "DELETE FROM person_names WHERE person IN
+               (SELECT person FROM person_names GROUP BY person HAVING COUNT(*) < 2)",
+            [],
+        )?;
+        Ok(())
+    })
+}
+
+/// Run `f` inside a savepoint, nested in any open transaction: all of its
+/// writes or none.
+fn in_savepoint<T>(
+    conn: &Connection,
+    f: impl FnOnce() -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch("SAVEPOINT people")?;
+    match f() {
+        Ok(v) => {
+            conn.execute_batch("RELEASE people")?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO people; RELEASE people");
+            Err(e)
+        }
+    }
+}
+
 /// Remove a book and *everything* tied to it, returning its `sha256` for the
 /// caller's delete of the on-disk `books/<sha>/` dir, or `None` for an absent
 /// id.
@@ -1594,9 +1729,9 @@ pub fn pending_or_error_book_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>
 }
 
 pub fn get_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<BookRow>> {
-    let root = conn_root(conn);
+    let ctx = row_context(conn)?;
     conn.query_row(SELECT_BOOK_WITH_JOB_BY_ID, params![book_id], |row| {
-        row_to_book(row, root.as_deref())
+        row_to_book(row, &ctx)
     })
     .optional()
 }
@@ -1774,7 +1909,22 @@ pub fn path_mtime_millis(path: &str) -> i64 {
         .unwrap_or(0)
 }
 
-fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<BookRow> {
+/// What reading a book row takes beyond the row: the library root its paths
+/// resolve against and the people its credited names belong to.
+struct RowContext {
+    root: Option<PathBuf>,
+    people: credits::People,
+}
+
+fn row_context(conn: &Connection) -> rusqlite::Result<RowContext> {
+    Ok(RowContext {
+        root: conn_root(conn),
+        people: credits::People::new(list_people(conn)?),
+    })
+}
+
+fn row_to_book(row: &rusqlite::Row<'_>, ctx: &RowContext) -> rusqlite::Result<BookRow> {
+    let root = ctx.root.as_deref();
     let tags_json: String = row.get(19)?;
     // A corrupt `tags_json` parses to no tags.
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -1794,10 +1944,10 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
     );
     // Derived (not a column): the device match key — curated romaji (or a live
     // fallback when a column is empty) + auto-romanized series/publisher/tags +
-    // the raw fields, every credited name among them. Recomputed fresh on every read.
+    // the raw fields, every name of every credited person among them.
     let search_key = super::romaji::search_key(
         &title,
-        &credits::join_display(&credits::names(&book_credits)),
+        &credits::join_display(&credits::every_name(&book_credits, &ctx.people)),
         publisher.as_deref(),
         series_name.as_deref(),
         &tags,
@@ -1815,6 +1965,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         sha256,
         title,
         author,
+        author_people: credits::author_people(&book_credits, &ctx.people),
         credits: book_credits,
         language,
         ppd: row.get(5)?,
@@ -2092,8 +2243,8 @@ pub fn upsert_book_ink(conn: &Connection, ink: &NewBookInk<'_>) -> rusqlite::Res
     )
 }
 
-/// A book's ink pages, display-ordered by the host anchor linear position (then
-/// page, then id) — the device's reading order, NOT the nbk's creation order.
+/// A book's ink pages in the device's reading order: by host anchor linear
+/// position, then page, then id.
 pub fn list_book_ink(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<BookInkRow>> {
     let mut stmt = conn.prepare(&format!(
         "{SELECT_BOOK_INK} WHERE book_id = ?1 ORDER BY host_linear, host_page, id"
@@ -2101,7 +2252,7 @@ pub fn list_book_ink(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<Bo
     stmt.query_map(params![book_id], row_to_book_ink)?.collect()
 }
 
-/// One ink row by id (for the reader panel's delete + cache cleanup).
+/// One ink row by id.
 pub fn get_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<BookInkRow>> {
     conn.query_row(
         &format!("{SELECT_BOOK_INK} WHERE id = ?1"),
@@ -2111,7 +2262,7 @@ pub fn get_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<BookI
     .optional()
 }
 
-/// Ink pages overlaying one 0-based host PDF page (usually one; possibly more).
+/// The unhidden ink pages overlaying one 0-based host PDF page.
 pub fn list_book_ink_on_page(
     conn: &Connection,
     book_id: i64,
@@ -2124,8 +2275,7 @@ pub fn list_book_ink_on_page(
         .collect()
 }
 
-/// Distinct host pages that carry anchored ink for a book — the reader chrome's
-/// "these pages have ink" set (drives the per-page overlay fetch + a marker).
+/// The distinct host pages carrying unhidden anchored ink for a book, ascending.
 pub fn book_ink_host_pages(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT host_page FROM book_ink \
@@ -2134,7 +2284,7 @@ pub fn book_ink_host_pages(conn: &Connection, book_id: i64) -> rusqlite::Result<
     stmt.query_map(params![book_id], |r| r.get(0))?.collect()
 }
 
-/// Unlinked ink pages (book not in the library) — the orphan inbox, for relink.
+/// The ink pages whose `book_id` is NULL.
 pub fn list_unlinked_book_ink(conn: &Connection) -> rusqlite::Result<Vec<BookInkRow>> {
     let mut stmt = conn.prepare(&format!("{SELECT_BOOK_INK} WHERE book_id IS NULL"))?;
     stmt.query_map([], row_to_book_ink)?.collect()
@@ -2155,7 +2305,7 @@ pub fn relink_ink(conn: &Connection, old_key: &str, new_key: &str) -> rusqlite::
     Ok(())
 }
 
-/// Point an ink page at a (re-)matched book. Used by ingest's relink pass.
+/// Point an ink page at a (re-)matched book.
 pub fn set_book_ink_book_id(conn: &Connection, id: i64, book_id: i64) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE book_ink SET book_id = ?1 WHERE id = ?2",
@@ -2406,7 +2556,7 @@ pub fn list_annotations_for_book(
         .collect()
 }
 
-/// Unlinked annotations (book not in the library) — the orphan inbox.
+/// The annotations whose `book_id` is NULL, by `clip_title` then reading position.
 pub fn list_unlinked_annotations(conn: &Connection) -> rusqlite::Result<Vec<AnnotationRow>> {
     let mut stmt = conn.prepare(&format!(
         "{SELECT_ANNOTATION} WHERE book_id IS NULL ORDER BY clip_title, linear_pos, loc_start, id"
@@ -2414,7 +2564,7 @@ pub fn list_unlinked_annotations(conn: &Connection) -> rusqlite::Result<Vec<Anno
     stmt.query_map([], row_to_annotation)?.collect()
 }
 
-/// Point an annotation at a (newly matched) book. Used by ingest's relink pass.
+/// Point an annotation at a (newly matched) book.
 pub fn set_annotation_book_id(
     conn: &Connection,
     annotation_id: i64,
@@ -2674,7 +2824,7 @@ pub fn clear_device_sync_checkpoints(
 }
 
 /// Delete one ink page by id with its device-presence rows, recording the deletion.
-/// Returns its `(asin, container_id)` for the caller's SVG cleanup.
+/// Returns its `(asin, container_id)`.
 pub fn delete_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<(String, String)>> {
     let key: Option<(String, String)> = conn
         .query_row(
@@ -3566,7 +3716,7 @@ mod tests {
             )
             .expect("insert");
         };
-        // `keep`/`gone` are legacy device imports (no annotation_device rows yet);
+        // `keep`/`gone` are legacy device imports (no annotation_device rows);
         // `native` is a Sidle-made annotation. None may be deleted by a sync.
         mk("keep", "yjr");
         mk("gone", "yjr");
@@ -3899,6 +4049,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_credit_packing_cjk_names_unpacks_once() {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO books (sha256, title, author, language, file_size, imported_at, tags,
+                                credits, updated_at)
+             VALUES ('sha', 'T', '春野一郎, 秋山次郎', 'ja', 0, '2026-01-01T00:00:00+00:00', '[]',
+                     '[{\"name\":\"春野一郎, 秋山次郎\",\"roles\":[]}]', '2026-01-01T00:00:00+00:00')",
+            [],
+        )
+        .expect("seed a packed credit");
+        let id = conn.last_insert_rowid();
+        conn.pragma_update(None, "user_version", 27).unwrap();
+
+        migrate(&conn).expect("re-migrate");
+        let row = get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(
+            row.credits,
+            [Credit::named("春野一郎"), Credit::named("秋山次郎")]
+        );
+        assert_eq!(row.author, "春野一郎、秋山次郎");
+        assert_eq!(row.updated_at, "2026-01-01T00:00:00+00:00");
+    }
+
+    #[test]
     fn a_writer_of_the_author_line_alone_replaces_the_authors() {
         let conn = fresh_db();
         let id = insert_book(
@@ -3926,6 +4101,113 @@ mod tests {
                 Credit::named("Bo Cowriter"),
                 Credit::with_roles("Ivy Drawer", &["ill"]),
             ]
+        );
+    }
+
+    #[test]
+    fn linked_names_read_as_one_person_on_every_book() {
+        let conn = fresh_db();
+        let en = insert_book(
+            &conn,
+            &NewBook {
+                credits: &[Credit::named("Ann Writer")],
+                ..new_book_shell("sha-en")
+            },
+        )
+        .unwrap();
+        let ja = insert_book(
+            &conn,
+            &NewBook {
+                credits: &[
+                    Credit::with_roles("アン・ライター", &["aut"]),
+                    Credit::with_roles("春野一郎", &["trl"]),
+                ],
+                language: "ja",
+                ..new_book_shell("sha-ja")
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_book(&conn, ja).unwrap().unwrap().author_people,
+            [vec!["アン・ライター".to_string()]]
+        );
+
+        link_names(&conn, &["Ann Writer".into(), "アン・ライター".into()]).unwrap();
+        let person = vec!["Ann Writer".to_string(), "アン・ライター".to_string()];
+        assert_eq!(list_people(&conn).unwrap(), std::slice::from_ref(&person));
+        for id in [en, ja] {
+            let row = get_book(&conn, id).unwrap().unwrap();
+            assert_eq!(
+                row.author_people,
+                std::slice::from_ref(&person),
+                "book {id}"
+            );
+        }
+        let ja_row = get_book(&conn, ja).unwrap().unwrap();
+        assert!(
+            ja_row.search_key.contains("annwriter"),
+            "{}",
+            ja_row.search_key
+        );
+        assert_eq!(
+            ja_row.author, "アン・ライター",
+            "the byline keeps the edition's name"
+        );
+
+        unlink_names(&conn, &person).unwrap();
+        assert!(list_people(&conn).unwrap().is_empty());
+        assert_eq!(
+            get_book(&conn, en).unwrap().unwrap().author_people,
+            [vec!["Ann Writer".to_string()]]
+        );
+    }
+
+    #[test]
+    fn linking_into_a_person_merges_it_and_the_names_given_lead() {
+        let conn = fresh_db();
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        link_names(&conn, &names(&["Ann Writer", "アン・ライター"])).unwrap();
+        link_names(&conn, &names(&["Bo Cowriter", "ボー"])).unwrap();
+        link_names(&conn, &names(&["Ann Writer", "安・作家"])).unwrap();
+        assert_eq!(
+            list_people(&conn).unwrap(),
+            [
+                names(&["Bo Cowriter", "ボー"]),
+                names(&["Ann Writer", "安・作家", "アン・ライター"]),
+            ]
+        );
+        link_names(&conn, &names(&["アン・ライター", "ボー"])).unwrap();
+        assert_eq!(
+            list_people(&conn).unwrap(),
+            [names(&[
+                "アン・ライター",
+                "ボー",
+                "Ann Writer",
+                "安・作家",
+                "Bo Cowriter"
+            ])],
+        );
+        link_names(&conn, &names(&["Lone Name"])).unwrap();
+        assert_eq!(
+            list_people(&conn).unwrap().len(),
+            1,
+            "one name links nothing"
+        );
+
+        unlink_names(&conn, &names(&["ボー"])).unwrap();
+        assert_eq!(
+            list_people(&conn).unwrap(),
+            [names(&[
+                "アン・ライター",
+                "Ann Writer",
+                "安・作家",
+                "Bo Cowriter"
+            ])]
+        );
+        unlink_names(&conn, &names(&["Ann Writer", "安・作家", "Bo Cowriter"])).unwrap();
+        assert!(
+            list_people(&conn).unwrap().is_empty(),
+            "a person of one name is no link"
         );
     }
 
@@ -4501,8 +4783,8 @@ mod tests {
             "a pertinent question",
             "",
         );
-        // Captured under the old rule, then re-inserted by a sync running the new
-        // code against a library not yet re-keyed.
+        // `old-rule` keys the passage first; a sync then inserts it again under
+        // `canonical`, into a library holding the `old-rule` key.
         insert_annotation(&conn, &passage(book, "old-rule", 25)).unwrap();
         insert_annotation(&conn, &passage(book, &canonical, 1586)).unwrap();
         record_device_book_presence(

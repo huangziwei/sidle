@@ -156,6 +156,10 @@ pub struct Book {
     // ---- Sort + facet metadata ----
     #[serde(default)]
     pub author: String,
+    /// The people the book is by, each as all its linked names, the first the one
+    /// it sorts under.
+    #[serde(default)]
+    pub author_people: Vec<Vec<String>>,
     #[serde(default)]
     pub language: String,
     #[serde(default)]
@@ -227,6 +231,9 @@ pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> 
 fn sanitize(book: &mut Book) {
     book.title = clean(&book.title);
     book.author = clean(&book.author);
+    for name in book.author_people.iter_mut().flatten() {
+        *name = clean(name);
+    }
     book.language = clean(&book.language);
     book.publisher = book.publisher.as_deref().map(clean);
     book.series_name = book.series_name.as_deref().map(clean);
@@ -717,8 +724,7 @@ fn collect_sidecars(sidle_dir: &Path) -> Result<Vec<SyncSdr>> {
 }
 
 /// The name and bytes of the first file in `sdr_dir` ending with `suffix`
-/// (`.yjr`, `.yjf`), on the same `ends_with` rule as sidle-core's
-/// `find_sidecar`.
+/// (`.yjr`, `.yjf`).
 fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<(String, Vec<u8>)>> {
     let Ok(entries) = std::fs::read_dir(sdr_dir) else {
         return Ok(None);
@@ -743,7 +749,7 @@ fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<(String, Vec<u8>)
 // ---------------------------------------------------------------------------
 
 /// The `POST /sync/notebooks` body: the standalone notebooks absent from the
-/// library's manifest. Mirrors sidle-server's `NotebookSyncRequest`.
+/// library's manifest.
 #[derive(Serialize)]
 struct NotebookRequest {
     notebooks: Vec<SyncNotebook>,
@@ -972,8 +978,7 @@ impl Collection {
     }
 }
 
-/// The collections [`fetch_collections`] falls back to, matching the two the
-/// library seeds itself with.
+/// The collections [`fetch_collections`] falls back to.
 fn default_collections() -> Vec<Collection> {
     vec![
         Collection {
@@ -1004,7 +1009,7 @@ struct CollectionsReply {
 }
 
 /// The `POST /sync/misc` body: each file base64, tagged with the collection it
-/// was scanned for. Mirrors sidle-server's `MiscSyncRequest`.
+/// was scanned for.
 #[derive(Serialize)]
 struct MiscRequest {
     device_serial: String,
@@ -1020,7 +1025,7 @@ struct MiscFile {
     data_b64: String,
 }
 
-/// sidle-server's `MiscSyncResult`: files stored, per collection id.
+/// The `POST /sync/misc` answer: files stored, per collection id.
 #[derive(Deserialize)]
 struct MiscReply {
     #[serde(default)]
@@ -1202,7 +1207,7 @@ fn misc_batches(entries: &[MiscEntry], budget: u64) -> Vec<Vec<&MiscEntry>> {
     out
 }
 
-/// How deep a recursive collection descends. Mirrors sidle-core's `MAX_DEPTH`.
+/// How deep a recursive collection descends.
 const MAX_DEPTH: usize = 5;
 
 /// One file [`collect_misc_files`] found, without its bytes.
@@ -1290,13 +1295,12 @@ fn gather_misc(
 }
 
 /// Names no collection sends, whatever its patterns: dotfiles and `.partial`
-/// writes. Mirrors sidle-core's `is_never_backed_up`.
+/// writes.
 fn is_never_sent(name: &str) -> bool {
     name.starts_with('.') || name.to_ascii_lowercase().ends_with(".partial")
 }
 
 /// Case-insensitive glob over a bare filename, `*` and `?` its metacharacters.
-/// Mirrors `sidle_core::library::device_backup::glob_match`.
 fn glob_match(pattern: &str, name: &str) -> bool {
     let pat: Vec<char> = pattern.to_lowercase().chars().collect();
     let text: Vec<char> = name.to_lowercase().chars().collect();
@@ -1335,6 +1339,7 @@ mod tests {
             ),
             device_filename: device_filename.map(str::to_string),
             author: String::new(),
+            author_people: Vec::new(),
             language: String::new(),
             publisher: None,
             series_name: None,

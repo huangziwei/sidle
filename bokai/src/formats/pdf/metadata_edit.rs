@@ -9,7 +9,7 @@ use super::edit::PdfPackage;
 #[derive(Debug, Clone, Default)]
 pub struct MetadataPatch {
     pub title: Option<String>,
-    /// Joined with `" & "` into `/Author`; an empty list removes it.
+    /// Joined by [`crate::model::join_names`] into `/Author`; an empty list removes it.
     pub authors: Option<Vec<String>>,
     /// Not representable in `/Info`; ignored.
     pub language: Option<String>,
@@ -43,7 +43,7 @@ pub fn edit_metadata(pdf_bytes: &[u8], patch: &MetadataPatch) -> std::io::Result
         sets.push(("Title", Some(encode_pdf_string(t))));
     }
     if let Some(authors) = &patch.authors {
-        let joined = authors.join(" & ");
+        let joined = crate::model::join_names(authors);
         let now = current(b"Author").map(|b| decode_pdf_string(&b));
         if joined.is_empty() {
             if now.is_some() {
@@ -211,6 +211,16 @@ mod tests {
         let (title, author) = probe(&out);
         assert_eq!(title.as_deref(), Some("人間失格"));
         assert_eq!(author.as_deref(), Some("太宰 治"));
+    }
+
+    #[test]
+    fn cjk_authors_join_with_the_ideographic_comma() {
+        let patch = MetadataPatch {
+            authors: Some(vec!["春野一郎".into(), "秋山次郎".into()]),
+            ..Default::default()
+        };
+        let out = edit_metadata(&minimal(), &patch).expect("edit");
+        assert_eq!(probe(&out).1.as_deref(), Some("春野一郎、秋山次郎"));
     }
 
     #[test]

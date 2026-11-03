@@ -6,9 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::Book;
 
-/// Where the stock reader stores purchased downloads. One constant: a different
-/// on-device path is a one-line change. Reads `Items01`, which the Sidle
-/// reader/sync never touches.
+/// Where the stock reader stores purchased downloads.
 pub const ITEMS_DIR: &str = "/mnt/us/documents/Downloads/Items01";
 /// Device cover-thumbnail cache, keyed by ASIN.
 pub const THUMBS_DIR: &str = "/mnt/us/system/thumbnails";
@@ -17,9 +15,9 @@ pub const BIN_DIR: &str = "/mnt/us/extensions/kfxdedrm/bin";
 /// Where the engine writes each decrypted book.
 pub const OUT_DIR: &str = "/mnt/us/dedrm";
 
-/// kfxdedrm's four ABI builds, in the probe order its own `run_cmd.sh` uses:
-/// hard-float first, then soft, `_c11` vs `_old` libc within each. The first
-/// whose `<exe> test` exits 0 is the one that runs on this device.
+/// kfxdedrm's four ABI builds in probe order: hard-float `_c11` and `_old`, then
+/// soft-float `_old` and `_c11`. The first whose `<exe> test` exits 0 runs on this
+/// device.
 const ABI_VARIANTS: [&str; 4] = [
     "kfxdedrmhf_c11",
     "kfxdedrmhf_old",
@@ -27,8 +25,7 @@ const ABI_VARIANTS: [&str; 4] = [
     "kfxdedrm_c11",
 ];
 
-/// The extensions the engine's MOBI path names as candidates. `.azw` and
-/// `.prc` are not among them.
+/// The extensions the engine's MOBI path names as candidates.
 pub const MOBI_EXTENSIONS: [&str; 3] = ["azw3", "azw4", "mobi"];
 
 /// The engine's two code paths, which differ in how a book proves it carries
@@ -40,8 +37,7 @@ pub enum Format {
 }
 
 impl Format {
-    /// The family of the book at `path`, by extension. Case-insensitive: a FAT
-    /// partition round-trips through desktops that upper-case one.
+    /// The family of the book at `path`, by extension, case-insensitive.
     pub fn of_path(path: &Path) -> Option<Format> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         if ext == "kfx" {
@@ -70,14 +66,13 @@ pub struct DrmBook {
     pub cover_path: Option<PathBuf>,
 }
 
-/// Is the kfxdedrm engine installed? A cheap dir check gating entry to the DRM
+/// Whether the kfxdedrm engine is installed: [`BIN_DIR`] is a directory.
 pub fn available() -> bool {
     Path::new(BIN_DIR).is_dir()
 }
 
 /// The working kfxdedrm binary for this device: the first ABI variant whose
-/// `<exe> test` exits 0 (mirrors `run_cmd.sh`'s `check_exec`). `None` when none
-/// runs (wrong ABI, or not installed) — the caller toasts and bails.
+/// `<exe> test` exits 0. `None` when none runs (wrong ABI, or not installed).
 pub fn probe_exe() -> Option<PathBuf> {
     let dir = Path::new(BIN_DIR);
     for name in ABI_VARIANTS {
@@ -105,8 +100,8 @@ pub fn out_path(path: &Path) -> Option<PathBuf> {
     out_in(Path::new(OUT_DIR), path, Format::of_path(path)?)
 }
 
-/// [`out_path`] with the output dir and the family injected; [`scan_in`] judges
-/// a temp tree with it. [`Format::Kfx`] takes the `.kfx-zip` extension;
+/// [`out_path`] with the output dir and the family injected: [`Format::Kfx`] takes
+/// the `.kfx-zip` extension, [`Format::Mobi`] keeps the book's own filename.
 fn out_in(dir: &Path, path: &Path, format: Format) -> Option<PathBuf> {
     match format {
         Format::Kfx => Some(dir.join(format!("{}.kfx-zip", path.file_stem()?.to_str()?))),
@@ -133,8 +128,7 @@ fn sdr_dir(path: &Path) -> PathBuf {
     parent.join(format!("{stem}.sdr"))
 }
 
-/// Every decrypted book currently in [`OUT_DIR`] — the DRM-mode Sync button
-/// re-pushes all of these to the server, which dedupes a repeat push to a no-op.
+/// Every decrypted book in [`OUT_DIR`].
 pub fn decrypted_books() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(OUT_DIR) else {
         return Vec::new();
@@ -162,14 +156,13 @@ fn is_output(path: &Path) -> bool {
 }
 
 /// Remove one purchased book's whole on-device footprint — encrypted input,
-/// `<stem>.sdr/`, decrypted output — once the desktop has it. Idempotent.
+/// `<stem>.sdr/`, decrypted output. Idempotent.
 pub fn cleanup_synced(path: &Path) -> Vec<(PathBuf, std::io::Error)> {
     cleanup_paths(path, &sdr_dir(path), out_path(path).as_deref())
 }
 
-/// [`cleanup_synced`] with the three targets injected; the removal is
-/// host-testable against a temp tree, the public entry wiring the name-derived
-/// paths. Order is input → sidecar → output, each removed leniently.
+/// [`cleanup_synced`] with the three targets injected, removed in the order
+/// input → sidecar → output, each leniently.
 fn cleanup_paths(book: &Path, sdr: &Path, out: Option<&Path>) -> Vec<(PathBuf, std::io::Error)> {
     let mut failures = Vec::new();
     remove_lenient(book, false, &mut failures);
@@ -182,7 +175,7 @@ fn cleanup_paths(book: &Path, sdr: &Path, out: Option<&Path>) -> Vec<(PathBuf, s
 
 /// Remove one path — a file (`is_dir` false) or a whole dir tree (`is_dir` true)
 /// — treating an absent path as success and pushing any real error onto
-/// `failures` for the caller to log.
+/// `failures`.
 fn remove_lenient(path: &Path, is_dir: bool, failures: &mut Vec<(PathBuf, std::io::Error)>) {
     let res = if is_dir {
         std::fs::remove_dir_all(path)
@@ -205,16 +198,13 @@ pub fn scan() -> Vec<DrmBook> {
     )
 }
 
-/// [`scan`] with the three dirs injected; the rule engine is host-testable
-/// against a temp tree, the public [`scan`] wiring the on-device consts.
+/// [`scan`] with the three dirs injected.
 fn scan_in(items: &Path, thumbs: &Path, out_dir: &Path) -> Vec<DrmBook> {
     let Ok(entries) = std::fs::read_dir(items) else {
         return Vec::new();
     };
 
-    // Collect (path, format, size, mtime) for every DRM'd book, newest first so
-    // the synthesized ids are stable and the default Date-added sort has a
-    // sensible tiebreak.
+    // Collect (path, format, size, mtime) for every DRM'd book, newest first.
     let mut found: Vec<(PathBuf, Format, u64, SystemTime)> = entries
         .flatten()
         .filter_map(|e| {
@@ -310,7 +300,7 @@ fn palmdoc_encryption(path: &Path) -> Option<u16> {
 
 /// The ASIN suffix of a filename stem: the final `_`-delimited token when it's a
 /// well-formed ASIN (`B` + 9 uppercase-alphanumerics, 10 chars). `None` for a
-/// filename carrying none, which costs the book its cover, not its tile.
+/// filename carrying none.
 fn parse_asin(stem: &str) -> Option<String> {
     let tok = stem.rsplit('_').next()?;
     let well_formed = tok.len() == 10
@@ -321,9 +311,8 @@ fn parse_asin(stem: &str) -> Option<String> {
     well_formed.then(|| tok.to_string())
 }
 
-/// The human title: the stem with its trailing `_<ASIN>` removed, and the
-/// filename-safe `_ ` (a sanitized `: `) restored — Amazon writes
-/// `All of Us_ The Collected Poems` for "All of Us: The Collected Poems".
+/// The human title: the stem with its trailing `_<ASIN>` removed and each `_ `
+/// (a sanitized `: `) restored to `: `.
 fn title_from_stem(stem: &str, asin: Option<&str>) -> String {
     let title = asin
         .and_then(|a| stem.strip_suffix(&format!("_{a}")))
@@ -338,9 +327,8 @@ fn cover_for(thumbs: &Path, asin: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// A unix-seconds mtime as a fixed-width decimal string, so `ui::sort`'s
-/// Date-added key (a plain string compare of `imported_at`) orders DRM books by
-/// download time.
+/// A unix-seconds mtime as a fixed-width, zero-padded decimal string: string
+/// order is time order.
 fn format_mtime(t: SystemTime) -> String {
     let secs = t
         .duration_since(UNIX_EPOCH)
@@ -351,7 +339,7 @@ fn format_mtime(t: SystemTime) -> String {
 
 /// A [`Book`] carrying only what a DRM book knows: id (its scan index), the
 /// filename title, byte size, and a sortable download time. Everything else is
-/// blank — DRM books have no series/author/tags, and render as standalone tiles.
+/// blank.
 fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_at: String) -> Book {
     Book {
         id,
@@ -359,6 +347,7 @@ fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_a
         kfx_sha256: None,
         device_filename: None,
         author: String::new(),
+        author_people: Vec::new(),
         language: String::new(),
         publisher: None,
         series_name: None,
@@ -372,8 +361,7 @@ fn synth_book(id: i64, title: String, format: Format, file_size: i64, imported_a
             }
             .to_string(),
         ),
-        // The ink sync matches against the library's asins. This book is not in
-        // the library, and an unset `asin` keeps it out of that match.
+        // An unset `asin` keeps the book out of the ink sync's match.
         asin: None,
         file_size,
         imported_at,
@@ -414,17 +402,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_asin_accepts_real_asins_and_rejects_junk() {
-        // The eight recon books all end `_B0…`.
+    fn parse_asin_accepts_well_formed_asins_and_rejects_junk() {
         for asin in [
-            "B00XST7S8C",
-            "B000FC1BQK",
-            "B000O76ON6",
-            "B078H4RWP7",
-            "B01LRIQ74G",
-            "B0BXTBYRVC",
-            "B01MXXZOEW",
-            "B00ZJZGVYK",
+            "B00000000A",
+            "B00000000B",
+            "B00000000C",
+            "B00000000D",
+            "B00000000E",
+            "B00000000F",
+            "B00000000G",
+            "B00000000H",
         ] {
             assert_eq!(
                 parse_asin(&format!("Some Title_{asin}")).as_deref(),
@@ -433,28 +420,28 @@ mod tests {
         }
         // Wrong length / prefix / case → not an ASIN.
         assert_eq!(parse_asin("No trailing token"), None);
-        assert_eq!(parse_asin("Title_B00XST7S8"), None); // 9 chars
-        assert_eq!(parse_asin("Title_B00XST7S8CC"), None); // 11 chars
-        assert_eq!(parse_asin("Title_A00XST7S8C"), None); // not B…
-        assert_eq!(parse_asin("Title_b00xst7s8c"), None); // lowercase
+        assert_eq!(parse_asin("Title_B00000000"), None); // 9 chars
+        assert_eq!(parse_asin("Title_B00000000AC"), None); // 11 chars
+        assert_eq!(parse_asin("Title_A00000000A"), None); // not B…
+        assert_eq!(parse_asin("Title_b00000000a"), None); // lowercase
     }
 
     #[test]
     fn title_strips_asin_and_restores_colon() {
         assert_eq!(
             title_from_stem(
-                "All of Us_ The Collected Poems (Vintage Contemporaries)_B00XST7S8C",
-                Some("B00XST7S8C")
+                "Collected Poems_ A Selection (Classics)_B00000000A",
+                Some("B00000000A")
             ),
-            "All of Us: The Collected Poems (Vintage Contemporaries)"
+            "Collected Poems: A Selection (Classics)"
         );
         // No sanitized colon → unchanged but for the ASIN strip.
         assert_eq!(
             title_from_stem(
-                "Neuromancer (Sprawl Trilogy Book 1)_B000O76ON6",
-                Some("B000O76ON6")
+                "A Novel (Some Trilogy Book 1)_B00000000C",
+                Some("B00000000C")
             ),
-            "Neuromancer (Sprawl Trilogy Book 1)"
+            "A Novel (Some Trilogy Book 1)"
         );
         // A sideload with no ASIN keeps its whole stem.
         assert_eq!(
@@ -473,7 +460,7 @@ mod tests {
                 "{ext}"
             );
         }
-        // FAT round-trips through desktops that upper-case extensions.
+        // Upper-case extensions classify the same.
         assert_eq!(Format::of_path(Path::new("a.AZW3")), Some(Format::Mobi));
         assert_eq!(Format::of_path(Path::new("a.KFX")), Some(Format::Kfx));
         // The engine's scanner names neither of these.
@@ -489,26 +476,26 @@ mod tests {
     fn kfx_output_takes_a_new_extension_and_mobi_keeps_its_own() {
         let items = Path::new(ITEMS_DIR);
         assert_eq!(
-            out_path(&items.join("Book_B000O76ON6.kfx")),
-            Some(Path::new(OUT_DIR).join("Book_B000O76ON6.kfx-zip"))
+            out_path(&items.join("Book_B00000000C.kfx")),
+            Some(Path::new(OUT_DIR).join("Book_B00000000C.kfx-zip"))
         );
         // The MOBI path copies the file under its own name — same name, same
         // extension, different directory.
         assert_eq!(
-            out_path(&items.join("Some Book_B000O76ON6.azw3")),
-            Some(Path::new(OUT_DIR).join("Some Book_B000O76ON6.azw3"))
+            out_path(&items.join("Some Book_B00000000C.azw3")),
+            Some(Path::new(OUT_DIR).join("Some Book_B00000000C.azw3"))
         );
         // `file_stem` splits at the last dot; a volume number survives.
         assert_eq!(
-            out_path(&items.join("All of Us_ Vol. 1_B00XST7S8C.kfx")),
-            Some(Path::new(OUT_DIR).join("All of Us_ Vol. 1_B00XST7S8C.kfx-zip"))
+            out_path(&items.join("Collected Poems_ Vol. 1_B00000000A.kfx")),
+            Some(Path::new(OUT_DIR).join("Collected Poems_ Vol. 1_B00000000A.kfx-zip"))
         );
         assert_eq!(out_path(Path::new("/x/noext")), None);
     }
 
     #[test]
     fn source_book_inverts_out_path_for_both_families() {
-        for name in ["Book_B000O76ON6.kfx", "Book_B000O76ON6.azw3", "Book.mobi"] {
+        for name in ["Book_B00000000C.kfx", "Book_B00000000C.azw3", "Book.mobi"] {
             let book = Path::new(ITEMS_DIR).join(name);
             let out = out_path(&book).unwrap();
             assert_eq!(source_book(&out).as_deref(), Some(book.as_path()), "{name}");
@@ -543,29 +530,29 @@ mod tests {
                 std::fs::write(assets.join("voucher"), b"v").unwrap();
             }
         };
-        kfx("Good Book_ Subtitle_B000O76ON6", true); // kept (has a cover, below)
-        kfx("Coverless_B01MXXZOEW", true); // kept, but no thumbnail → placeholder
-        kfx("Half Book_B000FC1BQK", false); // no voucher → skipped
-        kfx("Done Book_B078H4RWP7", true); // already decrypted → skipped
-        std::fs::write(out.join("Done Book_B078H4RWP7.kfx-zip"), b"z").unwrap();
-        std::fs::write(items.join("._Good Book_ Subtitle_B000O76ON6.kfx"), b"x").unwrap();
+        kfx("Good Book_ Subtitle_B00000000C", true); // kept (has a cover, below)
+        kfx("Coverless_B00000000G", true); // kept, but no thumbnail → placeholder
+        kfx("Half Book_B00000000B", false); // no voucher → skipped
+        kfx("Done Book_B00000000D", true); // decrypted output present → skipped
+        std::fs::write(out.join("Done Book_B00000000D.kfx-zip"), b"z").unwrap();
+        std::fs::write(items.join("._Good Book_ Subtitle_B00000000C.kfx"), b"x").unwrap();
         std::fs::create_dir_all(items.join("updates")).unwrap();
 
         std::fs::write(items.join("Sideload_ A Novel.azw3"), mobi_book(2)).unwrap();
-        std::fs::write(items.join("Old Book_B01LRIQ74G.mobi"), mobi_book(1)).unwrap();
-        std::fs::write(items.join("Free Book_B0BXTBYRVC.mobi"), mobi_book(0)).unwrap();
-        std::fs::write(items.join("Weird_B00ZJZGVYK.azw3"), mobi_book(9)).unwrap();
-        std::fs::write(items.join("Topaz_B00XST7S8C.azw3"), palmdb(b"TPZ3TPZ3", 2)).unwrap();
-        std::fs::write(items.join("Not A Book_B000FC1BQK.azw"), mobi_book(2)).unwrap();
+        std::fs::write(items.join("Old Book_B00000000E.mobi"), mobi_book(1)).unwrap();
+        std::fs::write(items.join("Free Book_B00000000F.mobi"), mobi_book(0)).unwrap();
+        std::fs::write(items.join("Weird_B00000000H.azw3"), mobi_book(9)).unwrap();
+        std::fs::write(items.join("Topaz_B00000000A.azw3"), palmdb(b"TPZ3TPZ3", 2)).unwrap();
+        std::fs::write(items.join("Not A Book_B00000000B.azw"), mobi_book(2)).unwrap();
 
         // A complete thumbnail for the good book; a partial one is ignored.
         std::fs::write(
-            thumbs.join("thumbnail_B000O76ON6_EBOK_portrait.jpg"),
+            thumbs.join("thumbnail_B00000000C_EBOK_portrait.jpg"),
             b"jpg",
         )
         .unwrap();
         std::fs::write(
-            thumbs.join("thumbnail_B01MXXZOEW_EBOK_portrait.jpg.tmp.partial"),
+            thumbs.join("thumbnail_B00000000G_EBOK_portrait.jpg.tmp.partial"),
             b"partial",
         )
         .unwrap();
@@ -582,29 +569,28 @@ mod tests {
 
         // The `.kfx` under Items01 is the decrypt input; its complete cover
         // matched by ASIN (a `.tmp.partial` thumbnail is treated as absent).
-        assert!(good.path.ends_with("Good Book_ Subtitle_B000O76ON6.kfx"));
+        assert!(good.path.ends_with("Good Book_ Subtitle_B00000000C.kfx"));
         assert!(good.cover_path.is_some());
         assert_eq!(coverless.cover_path, None);
         // Each family's own output naming, rooted at the injected dir.
         assert_eq!(
             good.out_path,
-            out.join("Good Book_ Subtitle_B000O76ON6.kfx-zip")
+            out.join("Good Book_ Subtitle_B00000000C.kfx-zip")
         );
         assert_eq!(sideload.out_path, out.join("Sideload_ A Novel.azw3"));
-        assert_eq!(old.out_path, out.join("Old Book_B01LRIQ74G.mobi"));
+        assert_eq!(old.out_path, out.join("Old Book_B00000000E.mobi"));
         // A sideload with no ASIN is listed, without a cover.
         assert_eq!(sideload.cover_path, None);
-        // The Format facet reads the conversion kind: KFX its own, the MOBI
-        // family the EPUB side the desktop imports them through.
+        // The conversion kind: `kfx_to_epub` for a KFX, `epub_to_kfx` for the MOBI
+        // family.
         assert_eq!(good.book.kind.as_deref(), Some("kfx_to_epub"));
         assert_eq!(sideload.book.kind.as_deref(), Some("epub_to_kfx"));
         // Byte size comes off the scanned file.
         assert_eq!(sideload.book.file_size, mobi_book(2).len() as i64);
-        // No series/author → standalone tiles; empty search_key feeds the title
-        // search fallback.
+        // No series, and an empty `search_key`.
         assert!(good.book.series_name.is_none());
         assert!(good.book.search_key.is_empty());
-        // ids are the contiguous scan indices (the cover/tap seams key off this).
+        // ids are the contiguous scan indices.
         let mut ids: Vec<i64> = found.iter().map(|d| d.book.id).collect();
         ids.sort();
         assert_eq!(ids, vec![0, 1, 2, 3]);
@@ -622,18 +608,18 @@ mod tests {
 
         // The synced book: encrypted `.kfx`, its `.sdr` sidecar (with voucher),
         // and the decrypted `.kfx-zip` output.
-        let kfx = items.join("Good Book_B000O76ON6.kfx");
-        let sdr = items.join("Good Book_B000O76ON6.sdr");
-        let zip = out.join("Good Book_B000O76ON6.kfx-zip");
+        let kfx = items.join("Good Book_B00000000C.kfx");
+        let sdr = items.join("Good Book_B00000000C.sdr");
+        let zip = out.join("Good Book_B00000000C.kfx-zip");
         std::fs::write(&kfx, b"kfx").unwrap();
         std::fs::create_dir_all(sdr.join("assets")).unwrap();
         std::fs::write(sdr.join("assets/voucher"), b"v").unwrap();
         std::fs::write(&zip, b"z").unwrap();
 
         // A neighbouring book that must be left fully intact.
-        let other_kfx = items.join("Other_B01MXXZOEW.kfx");
-        let other_sdr = items.join("Other_B01MXXZOEW.sdr");
-        let other_zip = out.join("Other_B01MXXZOEW.kfx-zip");
+        let other_kfx = items.join("Other_B00000000G.kfx");
+        let other_sdr = items.join("Other_B00000000G.sdr");
+        let other_zip = out.join("Other_B00000000G.kfx-zip");
         std::fs::write(&other_kfx, b"kfx").unwrap();
         std::fs::create_dir_all(&other_sdr).unwrap();
         std::fs::write(&other_zip, b"z").unwrap();

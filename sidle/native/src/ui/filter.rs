@@ -6,9 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::api::Book;
 use crate::collate::natural_compare;
 
-/// Sentinel value for "this book has no value for this facet" — itself a
-/// selectable option (so "books with no author" is a filter you can pick).
-/// Mirrors the desktop's `"—"`.
+/// Sentinel value for "this book has no value for this facet", itself a
+/// selectable option.
 pub const NONE: &str = "—";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,13 +57,12 @@ impl Filters {
         self.sel.get(&facet).filter(|s| !s.is_empty())
     }
 
-    /// How many values are selected in a facet — shown on its menu row.
+    /// How many values are selected in a facet.
     pub fn count(&self, facet: Facet) -> usize {
         self.sel.get(&facet).map(BTreeSet::len).unwrap_or(0)
     }
 
-    /// Number of facets with at least one value selected — drives the strip's
-    /// active-filter badge.
+    /// Number of facets with at least one value selected.
     pub fn active_facets(&self) -> usize {
         Facet::ALL.iter().filter(|f| self.count(**f) > 0).count()
     }
@@ -93,12 +91,17 @@ impl Filters {
     }
 }
 
-/// The values a book contributes to a facet. Author splits on ASCII *and* CJK
+/// A person's names as the Author facet shows them.
+pub fn person_label(names: &[String]) -> String {
+    names.join(" / ")
+}
+
+/// The values a book contributes to a facet; Author gives one per person the book
+/// is by.
 pub fn extract_facet_values(book: &Book, facet: Facet) -> Vec<String> {
     match facet {
         Facet::Language => vec![non_empty_or_sentinel(&book.language)],
-        // Always exactly one value, and never the [`NONE`] sentinel: every book
-        // was imported from something, and an absent `kind` still means EPUB.
+        // Exactly one value, never the [`NONE`] sentinel: an absent `kind` reads as EPUB.
         Facet::Format => vec![book.source_format().to_string()],
         Facet::Publisher => vec![non_empty_or_sentinel(
             book.publisher.as_deref().unwrap_or(""),
@@ -114,21 +117,13 @@ pub fn extract_facet_values(book: &Book, facet: Facet) -> Vec<String> {
             }
         }
         Facet::Author => {
-            let trimmed = book.author.trim();
-            if trimmed.is_empty() {
-                return vec![NONE.to_string()];
-            }
-            // Split on ASCII or ideographic comma; trim each part (the desktop
-            // regex `\s*[,、]\s*` swallows surrounding whitespace), drop empties,
-            // dedupe in-order.
             let mut seen = BTreeSet::new();
-            let mut out = Vec::new();
-            for part in trimmed.split([',', '、']) {
-                let p = part.trim();
-                if !p.is_empty() && seen.insert(p.to_string()) {
-                    out.push(p.to_string());
-                }
-            }
+            let out: Vec<String> = book
+                .author_people
+                .iter()
+                .map(|names| person_label(names))
+                .filter(|label| !label.is_empty() && seen.insert(label.clone()))
+                .collect();
             if out.is_empty() {
                 vec![NONE.to_string()]
             } else {
@@ -147,9 +142,8 @@ fn non_empty_or_sentinel(s: &str) -> String {
     }
 }
 
-/// AND across active facets, OR within (`library.js`'s `matchesFacets` +
-/// `activeFacetsExcept`). `skip` excludes one facet, for [`facet_options`]'
-/// leave-one-out cascade; pass `None` for the real visibility test.
+/// AND across active facets, OR within. `skip` excludes one facet, for
+/// [`facet_options`]' leave-one-out cascade; `None` tests real visibility.
 pub fn matches(book: &Book, filters: &Filters, skip: Option<Facet>) -> bool {
     for facet in Facet::ALL {
         if Some(facet) == skip {
@@ -167,7 +161,8 @@ pub fn matches(book: &Book, filters: &Filters, skip: Option<Facet>) -> bool {
 }
 
 /// Distinct values for a facet among the books matching **all other** active
-/// facets (leave-one-out cascade), each with its count, sorted with [`NONE`]
+/// facets, each with its count, the selected values among them, in natural order
+/// with [`NONE`] last.
 pub fn facet_options(books: &[Book], filters: &Filters, facet: Facet) -> Vec<(String, usize)> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for b in books {
@@ -204,6 +199,7 @@ mod tests {
             kfx_sha256: None,
             device_filename: None,
             author: String::new(),
+            author_people: Vec::new(),
             language: String::new(),
             publisher: None,
             series_name: None,
@@ -219,6 +215,11 @@ mod tests {
         }
     }
 
+    /// One person per name, each of that name alone.
+    fn by(names: &[&str]) -> Vec<Vec<String>> {
+        names.iter().map(|n| vec![n.to_string()]).collect()
+    }
+
     /// The conversion `kind` is the only record of what a book came from, and it
     /// is the string form `"<source>_to_<target>"`.
     #[test]
@@ -227,11 +228,9 @@ mod tests {
             (Some("pdf_to_kfx"), "PDF"),
             (Some("epub_to_kfx"), "EPUB"),
             (Some("kfx_to_epub"), "KFX"),
-            // A row without a job: the desktop reads this as EPUB, so we must too
-            // or the same book lands in different buckets on the two surfaces.
+            // A row without a job reads as EPUB.
             (None, "EPUB"),
-            // Anything unrecognised is EPUB rather than a new bucket, so an added
-            // conversion direction cannot silently fragment the facet.
+            // An unrecognised kind reads as EPUB.
             (Some("djvu_to_kfx"), "EPUB"),
         ] {
             let b = Book {
@@ -246,8 +245,7 @@ mod tests {
         }
     }
 
-    /// Format is never the "—" sentinel — every book came from something — and it
-    /// is exactly one value, so the facet is a clean partition of the library.
+    /// Format is never the "—" sentinel and is exactly one value per book.
     #[test]
     fn format_facet_partitions_and_multi_selects() {
         let pdf = Book {
@@ -268,15 +266,13 @@ mod tests {
             assert_ne!(v[0], NONE, "format should never be the none sentinel");
         }
 
-        // Selecting one value hides the others — the Scribe case, filtering down
-        // to the fixed-layout books it can actually show.
+        // Selecting one value hides the others.
         let mut f = Filters::default();
         f.toggle(Facet::Format, "PDF");
         assert!(matches(&pdf, &f, None));
         assert!(!matches(&epub, &f, None));
 
-        // OR within the facet, like every other one: the 7" case is the inverse,
-        // selecting everything readable and leaving PDFs out.
+        // OR within the facet: EPUB and KFX selected leave the PDF out.
         f.clear_all();
         f.toggle(Facet::Format, "EPUB");
         f.toggle(Facet::Format, "KFX");
@@ -286,22 +282,25 @@ mod tests {
     }
 
     #[test]
-    fn author_splits_on_ascii_and_cjk_comma() {
+    fn author_gives_one_value_per_person() {
         let b = Book {
-            author: "村上春樹、夏目漱石".into(),
+            author: "春野一郎、秋山次郎".into(),
+            author_people: by(&["春野一郎", "秋山次郎"]),
             ..book(1)
         };
         assert_eq!(
             extract_facet_values(&b, Facet::Author),
-            vec!["村上春樹", "夏目漱石"]
+            vec!["春野一郎", "秋山次郎"]
         );
-        let b2 = Book {
-            author: "Strunk, White".into(),
+        let linked = Book {
+            author: "アン・ライター".into(),
+            author_people: vec![vec!["Ann Writer".into(), "アン・ライター".into()]],
             ..book(2)
         };
         assert_eq!(
-            extract_facet_values(&b2, Facet::Author),
-            vec!["Strunk", "White"]
+            extract_facet_values(&linked, Facet::Author),
+            vec!["Ann Writer / アン・ライター"],
+            "a person of linked names is one value, whichever name the book credits"
         );
     }
 
@@ -320,17 +319,17 @@ mod tests {
         let books = [
             Book {
                 language: "jp".into(),
-                author: "A".into(),
+                author_people: by(&["A"]),
                 ..book(1)
             },
             Book {
                 language: "jp".into(),
-                author: "B".into(),
+                author_people: by(&["B"]),
                 ..book(2)
             },
             Book {
                 language: "en".into(),
-                author: "A".into(),
+                author_people: by(&["A"]),
                 ..book(3)
             },
         ];
@@ -352,17 +351,17 @@ mod tests {
         let books = vec![
             Book {
                 language: "jp".into(),
-                author: "A".into(),
+                author_people: by(&["A"]),
                 ..book(1)
             },
             Book {
                 language: "jp".into(),
-                author: "B".into(),
+                author_people: by(&["B"]),
                 ..book(2)
             },
             Book {
                 language: "en".into(),
-                author: "C".into(),
+                author_people: by(&["C"]),
                 ..book(3)
             },
         ];
@@ -374,8 +373,8 @@ mod tests {
             .map(|(v, _)| v)
             .collect();
         assert_eq!(authors, vec!["A", "B"]);
-        // But Language options ignore the language selection (leave-one-out) →
-        // still both languages, with counts.
+        // Language options ignore the language selection (leave-one-out): both
+        // languages, with counts.
         let langs = facet_options(&books, &f, Facet::Language);
         assert_eq!(langs, vec![("en".to_string(), 1), ("jp".to_string(), 2)]);
     }
@@ -399,8 +398,8 @@ mod tests {
         f.toggle(Facet::Publisher, "Z");
         f.toggle(Facet::Language, "en");
         let opts = facet_options(&books, &f, Facet::Publisher);
-        // Z must still appear (count 0) so it can be unselected; "—" (id 2's
-        // missing publisher, matching language=en) sorts after it.
+        // Z appears at count 0; "—" (id 2's missing publisher, matching
+        // language=en) sorts after it.
         assert_eq!(opts, vec![("Z".to_string(), 0), (NONE.to_string(), 1)]);
     }
 

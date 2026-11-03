@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::library::{backup, db, metadata, relocate};
+use crate::library::{backup, credits, db, metadata, relocate};
 
 /// What a merge brought in.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -22,7 +22,7 @@ pub struct MergeOutcome {
     pub ink_added: i64,
     /// Notebooks new to this library (existing uuids are left untouched).
     pub notebooks_added: i64,
-    /// The local ids of the books added or updated, for their files to follow.
+    /// The local ids of the books added or updated.
     #[serde(skip)]
     pub touched: Vec<i64>,
 }
@@ -38,7 +38,7 @@ struct SourceBook {
     row: db::BookRow,
     job: Option<SourceJob>,
     annotations: Vec<db::AnnotationRow>,
-    /// `source='sidle'` positions only — device positions re-sync.
+    /// `source='sidle'` positions only.
     positions: Vec<db::ReadingPosition>,
     ink: Vec<db::BookInkRow>,
 }
@@ -49,12 +49,14 @@ pub struct Prepared {
     dest_root: PathBuf,
     books: Vec<SourceBook>,
     notebooks: Vec<db::NotebookRow>,
+    /// The source's people, each as its linked names in order.
+    people: Vec<Vec<String>>,
 }
 
 impl Prepared {
     /// Whether there is anything to commit.
     pub fn is_empty(&self) -> bool {
-        self.books.is_empty() && self.notebooks.is_empty()
+        self.books.is_empty() && self.notebooks.is_empty() && self.people.is_empty()
     }
 }
 
@@ -87,9 +89,10 @@ pub fn prepare_with_progress(
             .with_context(|| format!("open staged library {}", src_db.display()))?;
         let books = read_source_books(&conn).context("read source books")?;
         let notebooks = db::list_notebooks(&conn).context("read source notebooks")?;
-        (books, notebooks)
+        let people = db::list_people(&conn).context("read source people")?;
+        (books, notebooks, people)
     };
-    let (books, notebooks) = inventory;
+    let (books, notebooks, people) = inventory;
 
     // Each new book or notebook dir copies into the live root. A
     // content-addressed book dir present means the same bytes; an existing
@@ -120,6 +123,7 @@ pub fn prepare_with_progress(
         dest_root: dest_root.to_path_buf(),
         books,
         notebooks,
+        people,
     })
 }
 
@@ -177,8 +181,7 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
         }
     }
 
-    // Notebooks: add-only (see module doc). An existing uuid is left entirely
-    // alone — its row and files never disagree.
+    // Notebooks: add-only; an existing uuid is left entirely alone.
     for nb in &prepared.notebooks {
         // Don't resurrect a notebook the dest library deleted.
         if db::is_deleted(&tx, db::DELETION_NOTEBOOK, &nb.uuid)
@@ -201,6 +204,15 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
             )?;
             out.notebooks_added += 1;
         }
+    }
+
+    // People: every source link joins the library's, whose names keep their order
+    // ahead of those the source adds.
+    for group in &prepared.people {
+        let local = credits::People::new(db::list_people(&tx).context("read people")?);
+        let mut names: Vec<String> = group.iter().flat_map(|n| local.names_of(n)).collect();
+        names.extend(group.iter().cloned());
+        db::link_names(&tx, &names).context("link people")?;
     }
 
     tx.commit()?;
@@ -458,9 +470,9 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Build a library under `root` (canonicalized — same symlink caveat as
-    /// backup's seed). Each book gets an EPUB + cover whose bytes encode the sha,
-    /// one annotation (hash `h-<sha>`), and a `sidle` reading position.
+    /// Build a library under the canonical `root`. Each book gets an EPUB + cover whose
+    /// bytes encode the sha, one annotation (hash `h-<sha>`), and a `sidle` reading
+    /// position.
     fn seed(root: &Path, books: &[(&str, &str, &str)]) -> Connection {
         let conn = db::open(&root.join("library.db")).unwrap();
         for (sha, title, updated_at) in books {
@@ -775,5 +787,41 @@ mod tests {
         let again = merge_into(&dst_conn, &dst_root, &zip);
         assert_eq!(again.notebooks_added, 0);
         assert_eq!(db::list_notebooks(&dst_conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn source_links_join_the_library_s_and_its_order_leads() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let src = tempfile::tempdir().unwrap();
+        let src_root = src.path().canonicalize().unwrap();
+        let src_conn = seed(&src_root, &[]);
+        db::link_names(&src_conn, &names(&["アン・ライター", "安・作家"])).unwrap();
+        db::link_names(&src_conn, &names(&["Bo Cowriter", "ボー"])).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let zip = backup_of(&src_conn, &src_root, out.path());
+        drop(src_conn);
+
+        let dst = tempfile::tempdir().unwrap();
+        let dst_root = dst.path().canonicalize().unwrap();
+        let dst_conn = seed(&dst_root, &[]);
+        db::link_names(&dst_conn, &names(&["Ann Writer", "アン・ライター"])).unwrap();
+
+        merge_into(&dst_conn, &dst_root, &zip);
+        let mut people = db::list_people(&dst_conn).unwrap();
+        people.sort();
+        assert_eq!(
+            people,
+            [
+                names(&["Ann Writer", "アン・ライター", "安・作家"]),
+                names(&["Bo Cowriter", "ボー"]),
+            ]
+        );
+
+        merge_into(&dst_conn, &dst_root, &zip);
+        assert_eq!(
+            db::list_people(&dst_conn).unwrap().len(),
+            2,
+            "a re-merge adds nothing"
+        );
     }
 }

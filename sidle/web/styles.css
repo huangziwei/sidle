@@ -103,9 +103,8 @@ button {
   background: var(--border);
 }
 
-/* A `.btn` without the frame, for controls that must be reachable but should
-   not compete with the panel they sit in — a calendar's step arrows, the escape
-   out of a selected day. Compact enough to share a header line with a `.seg`. */
+/* A frameless `.btn`, compact enough to share a header line with a `.seg`: a
+   calendar's step arrows, the escape out of a selected day. */
 .btn-quiet {
   background: transparent;
   border-color: transparent;
@@ -125,8 +124,7 @@ button {
   overflow: hidden;
 }
 /* The author `display: inline-flex` above shadows the UA `[hidden]{display:none}`;
-   `.seg[hidden]` restores it for `$("#view-seg").hidden = true` on the Misc and
-   Kindle pages, which have no Gallery/List. */
+   `.seg[hidden]` restores it. */
 .seg[hidden] {
   display: none;
 }
@@ -365,7 +363,8 @@ button {
   border-top: 1px solid var(--border);
 }
 
-.filter-dropdown-clear {
+.filter-dropdown-clear,
+.filter-dropdown-person {
   background: transparent;
   border: 0;
   color: var(--accent);
@@ -374,8 +373,13 @@ button {
   font: inherit;
 }
 
-.filter-dropdown-clear:hover {
+.filter-dropdown-clear:hover,
+.filter-dropdown-person:hover {
   background: var(--bg);
+}
+
+.filter-dropdown-person[hidden] {
+  display: none;
 }
 
 /* Format facet only: switch the pill between companion (non-KFX file) and
@@ -584,7 +588,7 @@ button {
   max-width: 540px;
 }
 
-/* Responsive card grid — new Kindle features land as new .device-card. */
+/* Responsive grid of `.device-card`s. */
 .device-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -694,8 +698,7 @@ button {
   padding: 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  /* Internal scroll, capped to keep the deploy and LAN-server sections on the
-     popover. The popover scrolls past 80vh of content. */
+  /* Internal scroll, capped; the popover scrolls past 80vh of content. */
   max-height: 260px;
   overflow-y: auto;
 }
@@ -1009,8 +1012,7 @@ button {
   color: var(--accent);
 }
 
-/* Gallery view. The tile art a Kindle draws on its home screen is 1440×2200,
-   the same portrait frame a book cover gets. */
+/* Gallery view: tiles in the 1440×2200 portrait frame of a book cover. */
 .apps-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -1376,8 +1378,8 @@ kbd {
   padding-top: 9px;
 }
 
-/* Two book-edge bars peeking above the cover read as a stack of volumes
-   receding behind the front one (each narrower than the last, like Kindle). */
+/* Two book-edge bars peeking above the cover, each narrower than the last: a stack
+   of volumes receding behind the front one. */
 .series-stack::before,
 .series-stack::after {
   content: "";
@@ -1685,8 +1687,7 @@ kbd {
   box-shadow: inset -2px 0 0 0 var(--accent);
 }
 
-/* Floating ghost beside the cursor during a column drag. dragDropEnabled=true
-   blocks the platform drag API. */
+/* Floating ghost beside the cursor during a column drag. */
 .col-drag-ghost {
   position: fixed;
   pointer-events: none;
@@ -1704,9 +1705,8 @@ kbd {
   text-overflow: ellipsis;
 }
 
-/* Drag a book onto a series tile to file it there. Mouse-based like the column drag
-   above; the webview blocks the native drag API, and this styles the ghost and
-   highlights. See library.js wireBookDragSource. */
+/* Drag a book onto a series tile to file it there: the ghost and the highlights.
+   See library.js wireBookDragSource. */
 .book-drag-ghost {
   position: fixed;
   pointer-events: none;
@@ -2965,9 +2965,8 @@ kbd {
   user-select: none;
   -webkit-user-select: none;
 }
-/* Night mode: invert the rendered page (white → black) — image only; the text
-   overlay is transparent. Photos read as negatives, the accepted dark-reading
-   trade for a fixed image. */
+/* Night mode: invert the rendered page image (white → black); the text overlay is
+   transparent. */
 .reader-pdf-spread.invert .reader-pdf-img {
   filter: invert(1) hue-rotate(180deg);
 }
@@ -3019,8 +3018,7 @@ kbd {
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
 }
 /* Night mode: invert the page (white → black, dark strokes → light). Toggled on the
-   host, never the per-page svg, and it survives page turns — mirroring
-   .reader-pdf-spread.invert over the PDF ink overlay. */
+   host, never the per-page svg, surviving page turns. */
 .reader-paginator-host.invert .reader-notebook-page {
   filter: invert(1) hue-rotate(180deg);
 }
@@ -3050,7 +3048,7 @@ kbd {
 .reader-nav-left { left: 0; }
 .reader-nav-right { right: 0; }
 
-/* Bottom progress bar — Loc lower-left, whole-book % lower-right (Kindle-style). */
+/* Bottom progress bar — Loc lower-left, whole-book % lower-right. */
 .reader-statusbar {
   flex: 0 0 auto;
   display: flex;
@@ -3445,9 +3443,8 @@ kbd {
   border-style: dashed;
 }
 
-/* Native annotations (T0): the page-bookmark toggle, the on-selection toolbar, and
-   the editable note popover. All tinted with the --reader-* chrome vars, retinting
-   with the page theme. */
+/* Native annotations: the page-bookmark toggle, the on-selection toolbar, and the
+   editable note popover, tinted with the --reader-* chrome vars. */
 
 /* Page-bookmark toggle in the topbar — orange flag when the page is bookmarked. */
 #reader-bookmark.is-active { color: #e07b39; }
@@ -3844,7 +3841,7 @@ kbd {
   background: var(--bg);
 }
 .notebook-cover img {
-  /* Show the whole page (it's a document, not art to crop). */
+  /* Show the whole page. */
   object-fit: contain;
 }
 .notebook-cover.svg-thumb {
@@ -4277,8 +4274,7 @@ kbd {
 .toc-label:focus {
   border-color: var(--accent);
 }
-/* PDF-only: the page an entry jumps to. PDF is the one format whose TOC target
-   is user-authored (KFX eids / EPUB hrefs round-trip opaquely). */
+/* PDF-only: the page an entry jumps to. */
 .toc-page-label {
   flex: 0 0 auto;
   color: var(--muted);

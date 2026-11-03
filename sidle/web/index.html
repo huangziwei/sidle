@@ -69,8 +69,7 @@
 
       <div class="filter-spacer"></div>
 
-      <!-- Grouping axis lives in this Books-only row (it has no meaning in Notes),
-           beside Sort — both shape how the result set is presented. -->
+      <!-- Grouping axis, in this Books-only row beside Sort. -->
       <div class="seg" id="group-seg" role="tablist" aria-label="Grouping">
         <button id="group-none" class="seg-btn active" role="tab" aria-selected="true"
                 title="Show every book individually">Flat</button>
@@ -90,6 +89,7 @@
       <div class="filter-dropdown-empty" hidden>No options match the current filters.</div>
       <div class="filter-dropdown-foot">
         <button type="button" class="filter-dropdown-clear">Clear</button>
+        <button type="button" class="filter-dropdown-person" hidden>Same person</button>
         <label class="filter-dropdown-mode" hidden>
           <input type="checkbox" class="filter-dropdown-mode-cb" />
           <span>By source</span>
@@ -123,8 +123,8 @@
 
       <section id="list" class="view" aria-label="List" hidden>
         <!-- colgroup + header + rows are built by the shared TableView (table.js)
-             from the Books column schema (the same component the Notes list uses),
-             honoring the user's drag-to-reorder + resize + show/hide choices. -->
+             from the Books column schema, with the stored column order, widths and
+             visibility. -->
         <table class="book-table">
           <colgroup></colgroup>
           <thead><tr></tr></thead>
@@ -135,8 +135,7 @@
         </div>
       </section>
 
-      <!-- The List view's top level when grouped by Series: a lightweight index of
-           series (kept separate from the book table, whose columns assume a book).
+      <!-- The List view's top level when grouped by Series: an index of series.
            Clicking a row drills in; the drilled-in list reuses the book table. -->
       <section id="series-list" class="view" aria-label="Series" hidden>
         <table class="series-table">
@@ -153,7 +152,7 @@
       <section id="notes" class="view" aria-label="Notes" hidden>
         <div id="notes-grid" class="notes-grid"></div>
         <!-- colgroup + header + rows are built by the shared TableView (table.js)
-             from notebooks.js's column schema — same as the Books list. -->
+             from notebooks.js's column schema. -->
         <table id="notes-list" class="book-table" hidden>
           <colgroup></colgroup>
           <thead><tr></tr></thead>
@@ -169,9 +168,9 @@
         </div>
       </section>
 
-      <!-- Files: what a Sync brings off the Kindle besides books
-           (device::misc). One group per collection in device-sync.json, built
-           by misc.js (window.Misc), which owns the viewers and the editor. -->
+      <!-- Files: what a Sync brings off the Kindle besides books, one group per
+           collection, built by misc.js (window.Misc), which owns the viewers and
+           the editor. -->
       <section id="misc" class="view misc" aria-label="Files" hidden>
         <div id="misc-empty" class="empty" hidden>
           <p>Nothing backed up yet.</p>
@@ -232,8 +231,8 @@
       </section>
 
       <!-- Kindle / device-management page, a full-width section like #gallery.
-           updateDeviceUI, refreshDeviceList, refreshDeviceAppStatus and
-           refreshServerStatus query the ids here by name. -->
+           updateDeviceUI, refreshDeviceList and refreshServerStatus query the ids
+           here by name. -->
       <section id="device-page" class="view device-page" aria-label="Kindle" hidden>
         <header class="device-page-header">
           <div class="device-page-title">
@@ -278,9 +277,7 @@
             </div>
           </section>
 
-          <!-- Apps are managed in the Apps tab, which is the only place they
-               are installed, updated, removed or added. This page keeps the
-               device itself: identity, storage, sync, and the LAN server. -->
+          <!-- The device itself: identity, storage, sync, and the LAN server. -->
           <section class="device-card server-section" aria-label="LAN server">
             <header class="server-section-header">
               <strong>LAN server</strong>
@@ -550,9 +547,8 @@
             <button type="button" id="settings-use" class="btn">Choose folder&hellip;</button>
           </section>
 
-          <!-- Which folders on the Kindle a Sync brings back, from the
-               library's device-sync.json. The picker fetches it before every
-               scan; misc.js builds the rows. -->
+          <!-- Which folders on the Kindle a Sync brings back; misc.js builds the
+               rows. -->
           <section class="settings-section">
             <h3>Kindle folders</h3>
             <p class="settings-hint">

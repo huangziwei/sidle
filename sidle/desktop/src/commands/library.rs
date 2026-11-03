@@ -38,6 +38,26 @@ pub async fn library_list(state: State<'_, AppState>) -> Result<Vec<BookRow>, St
     db::list_books(&conn).map_err(|e| e.to_string())
 }
 
+/// Link `names` as one person, those given leading in their order.
+#[tauri::command]
+pub async fn library_link_people(
+    state: State<'_, AppState>,
+    names: Vec<String>,
+) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::link_names(&conn, &names).map_err(|e| e.to_string())
+}
+
+/// Unlink each of `names` from the person it belongs to.
+#[tauri::command]
+pub async fn library_unlink_people(
+    state: State<'_, AppState>,
+    names: Vec<String>,
+) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::unlink_names(&conn, &names).map_err(|e| e.to_string())
+}
+
 /// A live tick from an import in flight.
 #[derive(Clone, Serialize)]
 struct ImportProgress<'a> {
@@ -356,8 +376,7 @@ pub async fn library_export_books(
 ) -> Result<export::Summary, String> {
     let format = export::Format::parse(&format).map_err(|e| e.to_string())?;
     let db = state.db.clone();
-    // KFX decode + IR walk (the `txt` route) is CPU-heavy; keep it off the async
-    // runtime.
+    // The export runs on a blocking thread, off the async runtime.
     tokio::task::spawn_blocking(move || {
         let conn = db.blocking_lock();
         export::export_books(&conn, &book_ids, format, Path::new(&dest_dir))
@@ -592,7 +611,7 @@ pub async fn library_relocate_move(
     let src_root = state.paths.root.clone();
     let copied = {
         let conn = state.db.lock().await;
-        // Only an idle queue moves: a conversion finishing mid-move writes into the old root.
+        // The move proceeds only with no conversion pending or running.
         if !db::pending_or_error_book_ids(&conn)
             .map_err(|e| e.to_string())?
             .is_empty()
@@ -688,9 +707,7 @@ pub async fn library_backup(
 
     // Zip on a blocking thread, lock-free; the snapshot guard cleans up there.
     let manifest = tokio::task::spawn_blocking(move || {
-        // Cap IPC chatter: emit only when the integer percentage changes (plus
-        // the final tick). The book/notebook loop can run into the hundreds, and
-        // restore/merge extract thousands of zip entries.
+        // Emit only when the integer percentage changes, plus the final tick.
         let last_pct = std::cell::Cell::new(-1i32);
         let on_progress = |done: u64, total: u64| {
             let pct = (done * 100).checked_div(total).unwrap_or(0) as i32;
@@ -752,8 +769,7 @@ pub async fn library_restore(
     let src = PathBuf::from(src);
     let dest_root = state.paths.root.clone();
 
-    // Gate on an idle queue before mutating anything (same reasoning as
-    // relocate). Lock only for the check.
+    // Gate on an idle queue before mutating anything, locking only for the check.
     {
         let conn = state.db.lock().await;
         if !db::pending_or_error_book_ids(&conn)
@@ -852,8 +868,8 @@ pub async fn library_merge(
     let dest_root = state.paths.root.clone();
     let baker = app.clone();
 
-    // Validate → extract → copy new files, off the runtime and lock-free (mirrors
-    // backup's snapshot/zip split). Yields the in-memory inventory to apply.
+    // Validate → extract → copy new files, off the runtime and lock-free, yielding
+    // the in-memory inventory to apply.
     let prepared = tokio::task::spawn_blocking(move || {
         let last_pct = std::cell::Cell::new(-1i32);
         let on_progress = |done: u64, total: u64| {

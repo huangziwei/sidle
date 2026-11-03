@@ -28,7 +28,7 @@ const state = {
   search: "", // global free-text search across title, author, series, tags
   device: null, // DeviceInfo | null
   sent: [],     // Vec<DeviceBookRow>
-  sentSet: new Set(), // sha256s currently on device, derived from `sent`
+  sentSet: new Set(), // sha256s on the device, derived from `sent`
   convProgress: {},
   // Book ids whose conversion failed since `hideErrorReport` last ran.
   convFailures: [],
@@ -168,7 +168,7 @@ const CREDIT_ROLES = [
   ["ctb", "Contributor"],
 ];
 
-// Labels for the menu's codes and for others books state.
+// Labels for the menu's codes and for the other codes books state.
 const ROLE_LABELS = Object.fromEntries([
   ...CREDIT_ROLES,
   ["adp", "Adapter"],
@@ -211,6 +211,33 @@ function bylineOf(b) {
     groups.get(label).push(c.name);
   }
   return [...groups].map(([label, names]) => `${joinNames(names)} (${label})`).join("; ");
+}
+
+// A person's names as the Author facet shows them.
+function personLabel(names) {
+  return names.join(" / ");
+}
+
+// What an author sort orders a book by: the name each of its people sorts under,
+// else its byline.
+function authorSortKey(b) {
+  const people = b.author_people || [];
+  return people.length ? joinNames(people.map((names) => names[0])) : bylineOf(b);
+}
+
+// Every person the library's books are by, keyed by its facet label: its names and
+// how many books it has.
+function authorPeople() {
+  const out = new Map();
+  for (const b of state.books) {
+    for (const names of b.author_people || []) {
+      const label = personLabel(names);
+      const person = out.get(label);
+      if (person) person.books += 1;
+      else out.set(label, { names, books: 1 });
+    }
+  }
+  return out;
 }
 
 // Every credit with its roles, one per line.
@@ -352,7 +379,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 function loadPreferences() {
   const view = localStorage.getItem("view");
   if (view === "list") state.view = "list";
-  // `groupMode` holds the grouping; the abandoned `group` key is dropped.
+  // `groupMode` holds the grouping; a stored `group` key is dropped.
   const group = localStorage.getItem("groupMode");
   if (group === "none" || group === "series") state.group = group;
   localStorage.removeItem("group");
@@ -1068,7 +1095,7 @@ function sortedBooks(books) {
 function sortValue(b, key) {
   if (key === "on_kindle") return state.sentSet.has(b.sha256) ? 1 : 0;
   if (key === "series") return seriesSortKey(b);
-  if (key === "author") return bylineOf(b);
+  if (key === "author") return authorSortKey(b);
   return b[key];
 }
 
@@ -1203,12 +1230,8 @@ function extractFacetValues(book, facet) {
     case "language":
       return [book.language?.trim() || "—"];
     case "author": {
-      const trimmed = (book.author || "").trim();
-      if (!trimmed) return ["—"];
-      // " & " (multi-author join) OR CJK ideographic comma 「、」. A plain comma
-      // stays inside the name — it's the "Surname, Given" separator, not a join.
-      const parts = trimmed.split(/\s*[&、]\s*/).filter(Boolean);
-      return parts.length ? [...new Set(parts)] : ["—"];
+      const people = (book.author_people || []).map(personLabel);
+      return people.length ? people : ["—"];
     }
     case "on_kindle":
       return [state.sentSet.has(book.sha256) ? "yes" : "no"];
@@ -1248,7 +1271,8 @@ function matchesFacets(book, facets) {
   return true;
 }
 
-// Canonical match form, mirroring sidle-core's `romaji::canon`.
+// Canonical match form: ß/œ/ø/æ expanded, NFKD-folded, lowercase `[a-z0-9]` alone;
+// a letter or digit outside that answers empty.
 function canonSearch(s) {
   const folded = (s || "")
     .replace(/[ßẞ]/g, "ss")
@@ -1282,6 +1306,7 @@ function matchesSearch(book, terms) {
     book.author_romaji,
     ...(book.tags || []),
     ...(book.credits || []).map((c) => c.name),
+    ...(book.author_people || []).flat(),
   ]
     .filter(Boolean)
     .join(" ")
@@ -1782,9 +1807,8 @@ function subscribeFileopProgress() {
   });
 }
 
-// Live byte-progress for the file currently being sent to the Kindle, shown in
-// the footer status line (see renderQueue). Distinct from `device:send-progress`
-// below, which paints the per-file terminal result into the device popover.
+// Live byte-progress for the file being sent to the Kindle, in the footer status
+// line (see renderQueue).
 function subscribeSendActive() {
   window.api.listen("device:send-active", (e) => {
     const p = e?.payload;
@@ -1861,9 +1885,8 @@ async function sendBooks(bookIds) {
     btn.disabled = false;
     return;
   } finally {
-    // Clear the send queue once the batch ends. The flag guards against a final
-    // send-active/-progress event landing after this (Tauri events and the
-    // command response aren't mutually ordered) and re-populating it.
+    // Clear the send queue once the batch ends; `sendInFlight` keeps a late
+    // send-active/-progress event from re-populating it.
     sendInFlight = false;
     state.sendQueue = [];
     renderQueue();
@@ -2118,9 +2141,8 @@ async function deleteFromDevice(filenames, titles) {
     return;
   }
   let results = [];
-  // Light the status bar before the first round trip: the backend deletes one file at a
-  // time over MTP, a large batch spends minutes in here, and the grid re-reads once it
-  // ends.
+  // Light the status bar before the first round trip; the grid re-reads once the
+  // batch ends.
   state.deleting = { done: 0, total: filenames.length, title: titles[0] || "" };
   renderQueue();
   try {
@@ -2165,8 +2187,7 @@ function setImportStatus(label) {
   renderQueue();
 }
 
-// Display name for the status line: drop the extension; the device filename's
-// `_<sha8>` infix is harmless to keep and helps disambiguate.
+// Display name for the status line: the device filename without its extension.
 function importDisplayName(filename) {
   return String(filename || "").replace(/\.[^./\\]+$/, "");
 }
@@ -2269,9 +2290,8 @@ function subscribePullProgress() {
     renderQueue();
   });
 
-  // One per file removed from the Kindle. Gated on `state.deleting`, which holds a
-  // stray event from resurrecting the line after the batch resolves — the idiom
-  // `importBase` above uses.
+  // One per file removed from the Kindle, gated on `state.deleting`, which keeps a
+  // stray event from resurrecting the line after the batch resolves.
   window.api.listen("device:delete-progress", (e) => {
     const r = e.payload;
     if (!r || !state.deleting) return;
@@ -2283,8 +2303,8 @@ function subscribePullProgress() {
     renderQueue();
   });
 
-  // Status-bar progress counter. The backend emits this once on autopull start (`done:
-  // 0`) and once per book completed after, and the pull renders throughout.
+  // Status-bar progress counter: `done: 0` on autopull start, then a tick per book
+  // completed.
   window.api.listen("device:autopull-progress", (e) => {
     const p = e.payload;
     if (!p) return;
@@ -2662,8 +2682,7 @@ function updateImportRowProgress() {
   if (status) status.textContent = importStatusText(imp);
   const title = li.querySelector(".queue-title");
   if (title) title.textContent = imp.name || imp.message;
-  // The status bar carries the same numbers and is always visible, unlike the
-  // drawer.
+  // The status bar carries the same numbers.
   renderStatusSummary(
     state.books.filter(
       (b) => b.status === "pending" || b.status === "converting" || b.status === "error",
@@ -2899,9 +2918,8 @@ const BOOK_ACTIONS = [
     eligible: (b) => Boolean(b.amazon_asin) && looksLikeRealAsin(b.amazon_asin),
     label: (c) =>
       ActionMenu.counted(c.items.length > 1 ? "Re-fetch covers" : "Re-fetch cover", c),
-    // One book and many are two different backend calls, not one called twice:
-    // the single fetch reports per-book why it failed, the batch streams
-    // progress and reports a summary.
+    // One book takes the single fetch, which reports why it failed; several take
+    // the batch, which streams progress and reports a summary.
     run: (c) =>
       c.eligible.length === 1 ? recrawlCover(c.eligible[0]) : recrawlCovers(c.eligible),
   },
@@ -3010,9 +3028,9 @@ function exportMenuItems(books) {
   ]);
 }
 
-// Pick a destination folder, then copy each eligible book's `fmt` file into it
-// (the backend groups them into per-author subfolders). Reports a one-line
-// summary; per-book skips are logged to the console.
+// Pick a destination folder, then copy each eligible book's `fmt` file into it as
+// a flat folder of files. Reports a one-line summary; per-book skips are logged to
+// the console.
 async function doExport(books, fmt) {
   const eligible = books.filter((b) => hasFormatReady(b, fmt));
   if (eligible.length === 0) {
@@ -3715,8 +3733,8 @@ function resetRelocateConfirm() {
   $("#settings-confirm").hidden = true;
   const ok = $("#settings-confirm-ok");
   ok.disabled = false;
-  // Restore borrows this box for a second way to say yes and a louder primary
-  // button; hand both back, or the next move/use prompt inherits them.
+  // Hand back the second yes-button and the primary styling a restore prompt
+  // borrows.
   ok.textContent = "Confirm & restart";
   ok.classList.remove("btn-primary");
   const keep = $("#settings-confirm-keep");
@@ -3745,8 +3763,7 @@ async function pickRelocate(mode) {
 async function confirmRelocate(keepPrevious) {
   if (!relocatePending) return;
   const { mode, dest } = relocatePending;
-  // Both yes-buttons go down together: two live ways to commit during a running
-  // restore is two restores.
+  // Both yes-buttons disable together while the operation runs.
   $("#settings-confirm-ok").disabled = true;
   $("#settings-confirm-keep").disabled = true;
   setSettingsStatus(
@@ -3754,7 +3771,7 @@ async function confirmRelocate(keepPrevious) {
     : mode === "restore" ? "Restoring… this can take a while for a large backup."
     : "Switching library…",
   );
-  fileopInFlight = true; // only restore emits fileop; harmless for move/use
+  fileopInFlight = true; // admits restore's fileop progress events
   try {
     if (mode === "move") {
       await window.api.invoke("library_relocate_move", { dest });
@@ -3783,8 +3800,8 @@ function setSettingsStatus(msg, isError = false) {
   el.hidden = false;
 }
 
-// Backup is non-destructive — a direct action, not part of the confirm/restart
-// flow. Picks a destination, writes the archive, reports the counts.
+// Backup, outside the confirm/restart flow: pick a destination, write the archive,
+// report the counts.
 async function doBackup() {
   const dest = await window.api.invoke("library_backup_pick_dest");
   if (!dest) return;
@@ -3828,9 +3845,8 @@ async function pickRestore() {
   $("#settings-status").hidden = true;
 }
 
-// Merge is additive and non-destructive, with no replace and no restart: a
-// direct action like backup, outside the confirm/restart flow. It picks a
-// .sidlebak, folds its books and notebooks in, and re-lists.
+// Merge, additive and outside the confirm/restart flow: pick a .sidlebak, fold
+// its books, notebooks and linked names in, and re-list.
 async function doMerge() {
   const src = await window.api.invoke("library_merge_pick_src");
   if (!src) return;
@@ -3864,9 +3880,9 @@ function plural(n, word) {
 
 // ---------------------------------------------------------------------------
 
-// Currently-open dropdown facet name (e.g. "language") or null.
+// The open dropdown's facet name (e.g. "language") or null.
 let openDropdownFacet = null;
-// Current dropdown internal search input value.
+// The open dropdown's search input value.
 let dropdownSearch = "";
 // Debounce timer for the global free-text search input.
 let searchDebounceTimer = null;
@@ -3926,6 +3942,9 @@ function wireFilterBar() {
     if (openDropdownFacet) clearFacet(openDropdownFacet);
   });
 
+  // Author dropdown: link the ticked authors as one person, or separate one.
+  $(".filter-dropdown-person").addEventListener("click", applyPersonAction);
+
   // Format facet: companion ⇄ source mode toggle.
   $(".filter-dropdown-mode-cb").addEventListener("change", (e) => {
     setFormatFacetMode(e.target.checked ? "source" : "companion");
@@ -3957,6 +3976,7 @@ function wireFilterBar() {
 }
 
 function renderFilterBar() {
+  renderPersonAction();
   // "All" pill is active iff no filter is active.
   const allPill = document.querySelector('.pill[data-pill="all"]');
   allPill.classList.toggle("active", !hasAnyFilter());
@@ -4025,6 +4045,7 @@ function openFilterDropdown(facet, anchorPill) {
   modeWrap.hidden = facet !== "formats";
   dd.querySelector(".filter-dropdown-mode-cb").checked =
     state.formatFacetMode === "source";
+  renderPersonAction();
   positionPopover(dd, anchorPill);
   renderDropdownOptions(facet);
   // Focus the inner search for immediate filtering.
@@ -4090,6 +4111,59 @@ function renderDropdownOptions(facet) {
     });
     list.appendChild(li);
   }
+}
+
+// The ticked Author values that name a person, as their people.
+function tickedPeople() {
+  const people = authorPeople();
+  return [...state.filters.author].filter((v) => people.has(v)).map((v) => people.get(v));
+}
+
+// The Author dropdown's person action: "Same person" for two or more ticked
+// authors, "Separate" for one ticked person of several names.
+function renderPersonAction() {
+  const btn = $(".filter-dropdown-person");
+  const ticked = openDropdownFacet === "author" ? tickedPeople() : [];
+  let action = "";
+  if (ticked.length > 1) action = "link";
+  else if (ticked.length === 1 && ticked[0].names.length > 1) action = "unlink";
+  btn.hidden = !action;
+  btn.dataset.action = action;
+  btn.textContent = action === "unlink" ? "Separate" : "Same person";
+  btn.title =
+    action === "unlink"
+      ? `Treat ${ticked[0].names.join(", ")} as different people`
+      : "Treat the ticked authors as one person";
+}
+
+// Link the ticked authors as one person, the one with the most books leading, or
+// split a ticked person back into its names; the filter keeps showing the same books.
+async function applyPersonAction() {
+  const action = $(".filter-dropdown-person").dataset.action;
+  const ticked = tickedPeople();
+  try {
+    if (action === "link") {
+      ticked.sort((a, b) => b.books - a.books);
+      const names = [...new Set(ticked.flatMap((p) => p.names))];
+      await window.api.invoke("library_link_people", { names });
+      state.filters.author = new Set([personLabel(names)]);
+    } else if (action === "unlink") {
+      const { names } = ticked[0];
+      await window.api.invoke("library_unlink_people", { names });
+      state.filters.author = new Set(names);
+    } else {
+      return;
+    }
+  } catch (e) {
+    showToast(`failed to update people: ${e}`, true);
+    return;
+  }
+  await refresh();
+  const people = authorPeople();
+  state.filters.author = new Set([...state.filters.author].filter((v) => people.has(v)));
+  persistPreferences();
+  render();
+  if (openDropdownFacet === "author") renderDropdownOptions("author");
 }
 
 function positionPopover(popover, anchor) {
@@ -4171,9 +4245,7 @@ let metadataBook = null;
 // The array of books a bulk-mode modal edits, else null.
 let metadataBulk = null;
 
-// Mirror of cover_fetch::looks_like_real_amazon_asin: a real Amazon ASIN is 10 chars,
-// uppercase letters and digits. A synthesized file identity is 32 chars, and length
-// plus charset separates them.
+// Whether `s` has a real Amazon ASIN's shape: 10 uppercase letters and digits.
 function looksLikeRealAsin(s) {
   return /^[A-Z0-9]{10}$/.test(s);
 }
@@ -4408,7 +4480,7 @@ function setBulkPlaceholders(bulk) {
 }
 
 // Live validity feedback for the ASIN field, gating the Re-fetch button on a
-// real-looking ASIN. The recrawl backend returns NoAsin for anything else.
+// real-looking ASIN.
 function renderAsinHint() {
   const v = $("#metadata-form").amazon_asin.value.trim();
   const hint = $("#asin-hint");
@@ -4494,8 +4566,8 @@ async function submitMetadataForm() {
       form.series_name.value.trim() === "" ? null : form.series_name.value.trim(),
     series_index:
       form.series_index.value === "" ? null : Number(form.series_index.value),
-    // Tags split on ASCII or CJK comma (tags have no "Surname, Given" hazard,
-    // unlike authors). The backend lowercases + dedupes + drops empties.
+    // Tags split on ASCII or CJK comma; the backend lowercases, dedupes and drops
+    // empties.
     tags:
       tagsRaw === ""
         ? []

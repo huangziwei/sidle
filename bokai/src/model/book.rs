@@ -99,6 +99,15 @@ pub fn roles_agree(a: &[String], b: &[String]) -> bool {
     set(a) == set(b)
 }
 
+/// `names` joined into one text field: by `、` when every name is CJK, else by ` & `.
+pub fn join_names(names: &[String]) -> String {
+    if names.len() > 1 && names.iter().all(|n| n.chars().any(crate::text::is_cjk)) {
+        names.join("、")
+    } else {
+        names.join(" & ")
+    }
+}
+
 /// Whether an author's sort key for `old` holds for `new`: the same words in any
 /// order, case, commas and spacing aside (`Doe, Jane` → `Jane Doe`, `太宰治` →
 /// `太宰 治`).
@@ -1030,6 +1039,25 @@ mod tests {
         assert!(sort_key_survives("Le Guin, Ursula K.", "Ursula K. Le Guin"));
         assert!(!sort_key_survives("Jane Doe", "Jane Roe"));
         assert!(!sort_key_survives("太宰治", "夏目漱石"));
+    }
+
+    #[test]
+    fn names_join_by_script() {
+        let v = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(join_names(&v(&["Ann Writer"])), "Ann Writer");
+        assert_eq!(
+            join_names(&v(&["Ann Writer", "Bo Cowriter"])),
+            "Ann Writer & Bo Cowriter"
+        );
+        assert_eq!(
+            join_names(&v(&["春野一郎", "秋山次郎"])),
+            "春野一郎、秋山次郎"
+        );
+        assert_eq!(
+            join_names(&v(&["春野一郎", "Ann Writer"])),
+            "春野一郎 & Ann Writer"
+        );
+        assert_eq!(join_names(&[]), "");
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub mod toc_shape;
 
 pub use book::{
     Book, CollectionInfo, Contributor, Format, Landmark, LandmarkType, Metadata, OrientationLock,
-    PageSpread, Panel, PanelRect, PeriodicalKind, Resource, TocEntry, roles_agree,
+    PageSpread, Panel, PanelRect, PeriodicalKind, Resource, TocEntry, join_names, roles_agree,
     sort_key_survives,
 };
 

@@ -6,8 +6,7 @@ use std::cmp::Ordering;
 use crate::api::Book;
 use crate::collate::natural_compare;
 
-/// The seven sort keys, in the order shown in the Sort overlay (matches the
-/// desktop popover order). `on_kindle` is intentionally absent (see module doc).
+/// The seven sort keys, in the order the Sort overlay shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Title,
@@ -58,8 +57,7 @@ impl SortDir {
         }
     }
 
-    /// Compact arrow for the strip header / overlay (same Unicode arrow block as
-    /// the `← →` the pager strip already renders).
+    /// Compact arrow for the strip header and overlay.
     pub fn arrow(self) -> &'static str {
         match self {
             SortDir::Asc => "↑",
@@ -67,8 +65,7 @@ impl SortDir {
         }
     }
 
-    /// Spelled-out direction for the overlay's Direction row — carries the
-    /// meaning even if the arrow glyph isn't in the font.
+    /// Spelled-out direction for the overlay's Direction row.
     pub fn word(self) -> &'static str {
         match self {
             SortDir::Asc => "Ascending",
@@ -93,8 +90,8 @@ impl Default for SortState {
 }
 
 impl SortState {
-    /// Sort `books` in place by this key/direction. Stable so books that tie on
-    /// the key keep their prior (server) relative order.
+    /// Sort `books` in place by this key/direction, stably: books tying on the key
+    /// keep their prior relative order.
     pub fn apply(self, books: &mut [Book]) {
         books.sort_by(|a, b| compare(a, b, self));
     }
@@ -105,9 +102,8 @@ impl SortState {
     }
 }
 
-/// A book's comparable value for one key.
-/// `library.js`'s `sortedBooks`: a book with no value for the active
-/// key sinks to the bottom whether ascending or descending.
+/// A book's comparable value for one key; [`SortVal::Missing`] sinks to the bottom
+/// in either direction.
 enum SortVal<'a> {
     Text(Cow<'a, str>),
     Num(i64),
@@ -116,10 +112,9 @@ enum SortVal<'a> {
 
 fn value<'a>(book: &'a Book, key: SortKey) -> SortVal<'a> {
     match key {
-        // Non-Option columns are always present (empty string sorts as empty,
-        // matching the desktop, which only sinks JSON `null`/`undefined`).
+        // Non-Option columns are always present; an empty string sorts as empty.
         SortKey::Title => SortVal::Text(Cow::Borrowed(&book.title)),
-        SortKey::Author => SortVal::Text(Cow::Borrowed(&book.author)),
+        SortKey::Author => author_key(book),
         SortKey::Language => SortVal::Text(Cow::Borrowed(&book.language)),
         SortKey::DateAdded => SortVal::Text(Cow::Borrowed(&book.imported_at)),
         SortKey::Size => SortVal::Num(book.file_size),
@@ -132,7 +127,22 @@ fn value<'a>(book: &'a Book, key: SortKey) -> SortVal<'a> {
     }
 }
 
-/// Composite series key, port of `library.js`'s `seriesSortKey`:
+/// The name each person the book is by sorts under, else the author line: a
+/// person's books sort together whichever of its names they credit.
+fn author_key(book: &Book) -> SortVal<'_> {
+    if book.author_people.is_empty() {
+        return SortVal::Text(Cow::Borrowed(&book.author));
+    }
+    let names: Vec<&str> = book
+        .author_people
+        .iter()
+        .filter_map(|names| names.first().map(String::as_str))
+        .collect();
+    SortVal::Text(Cow::Owned(names.join(" & ")))
+}
+
+/// Composite series key: the series name, then the index ×10 zero-padded, a book
+/// with no index after those with one; missing without a series.
 fn series_key(book: &Book) -> SortVal<'static> {
     let name = book
         .series_name
@@ -188,6 +198,7 @@ mod tests {
             kfx_sha256: None,
             device_filename: None,
             author: String::new(),
+            author_people: Vec::new(),
             language: String::new(),
             publisher: None,
             series_name: None,
@@ -205,6 +216,38 @@ mod tests {
 
     fn ids(books: &[Book]) -> Vec<i64> {
         books.iter().map(|b| b.id).collect()
+    }
+
+    #[test]
+    fn a_person_s_books_sort_together_under_its_first_name() {
+        let person = vec!["Ann Writer".to_string(), "アン・ライター".to_string()];
+        let mut v = vec![
+            Book {
+                author: "アン・ライター".into(),
+                author_people: vec![person.clone()],
+                ..book(1)
+            },
+            Book {
+                author: "Bo Cowriter".into(),
+                author_people: vec![vec!["Bo Cowriter".into()]],
+                ..book(2)
+            },
+            Book {
+                author: "Ann Writer".into(),
+                author_people: vec![person],
+                ..book(3)
+            },
+        ];
+        SortState {
+            key: SortKey::Author,
+            dir: SortDir::Asc,
+        }
+        .apply(&mut v);
+        assert_eq!(
+            ids(&v)[2],
+            2,
+            "both editions sort under Ann Writer, ahead of Bo"
+        );
     }
 
     #[test]
@@ -290,7 +333,7 @@ mod tests {
             dir: SortDir::Desc,
         }
         .apply(&mut v);
-        assert_eq!(ids(&v), vec![3, 2, 1]); // still last, not flipped to front
+        assert_eq!(ids(&v), vec![3, 2, 1]); // last in either direction
     }
 
     #[test]
@@ -333,9 +376,8 @@ mod tests {
 
     #[test]
     fn cjk_author_split_is_a_facet_concern_sort_uses_raw_field() {
-        // Sort compares the raw author string as-is (the CJK comma split lives
-        // in the facet extractor, not here). Just assert determinism + that a
-        // CJK string sorts by code point without panicking on byte boundaries.
+        // With no `author_people`, the author line sorts as-is: a CJK string by code
+        // point, with no panic on a byte boundary.
         let mut v = vec![
             Book {
                 author: "村上春樹".into(),
@@ -351,7 +393,7 @@ mod tests {
             dir: SortDir::Asc,
         }
         .apply(&mut v);
-        // 村 (U+6751) < 夏 (U+590F)? No: 0x590F < 0x6751, so 夏目漱石 (id 2) first.
+        // 0x590F < 0x6751: id 2 sorts first.
         assert_eq!(ids(&v), vec![2, 1]);
     }
 }

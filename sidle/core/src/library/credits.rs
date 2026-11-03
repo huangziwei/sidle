@@ -1,5 +1,9 @@
 //! A book's credits — the names it credits, each with its roles — and the author
-//! line drawn from them, with the name normalization every entry path shares.
+//! line drawn from them, with the name normalization every entry path shares; and
+//! the people those names belong to, where several names are linked as one.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,19 +50,39 @@ const NAME_SUFFIXES: &[&str] = &[
     "jr", "sr", "ii", "iii", "iv", "v", "phd", "md", "do", "esq", "dds", "jd",
 ];
 
-/// True for characters in a CJK / kana / Hangul block. Keeps the
-/// `Surname, Given` flip away from East-Asian names, which never use an ASCII
-/// comma to separate the two halves of a single name.
-fn is_cjk(c: char) -> bool {
-    matches!(c as u32,
-        0x3040..=0x30FF |   // Hiragana + Katakana
-        0x3400..=0x4DBF |   // CJK Extension A
-        0x4E00..=0x9FFF |   // CJK Unified Ideographs
-        0xF900..=0xFAFF |   // CJK Compatibility Ideographs
-        0xFF00..=0xFFEF |   // Halfwidth/Fullwidth forms
-        0xAC00..=0xD7AF |   // Hangul syllables
-        0x20000..=0x2FA1F   // CJK Extension B+ / supplement
-    )
+/// Whether `name` holds a CJK, kana or Hangul character.
+fn is_cjk_name(name: &str) -> bool {
+    name.chars().any(bokai::text::is_cjk)
+}
+
+/// Whether `name` holds a Han ideograph or a Hangul syllable.
+fn is_han_or_hangul_name(name: &str) -> bool {
+    name.chars().any(|c| {
+        matches!(c as u32,
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F |
+            0xAC00..=0xD7AF
+        )
+    })
+}
+
+/// The names `packed` holds: split on `、`, and on an ASCII or full-width comma when
+/// every part holds Han or Hangul (`春野一郎, 秋山次郎` splits, `スミス，ジョン` stays one).
+fn unpack(packed: &str) -> Vec<&str> {
+    packed
+        .split('、')
+        .flat_map(|part| {
+            let names: Vec<&str> = part
+                .split([',', '，'])
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .collect();
+            if names.iter().all(|n| is_han_or_hangul_name(n)) {
+                names
+            } else {
+                vec![part]
+            }
+        })
+        .collect()
 }
 
 /// Flip a Western `"Surname, Given"` display name to natural `"Given Surname"`.
@@ -66,7 +90,7 @@ fn is_cjk(c: char) -> bool {
 /// contains a CJK character, or the post-comma part is a generational suffix.
 pub fn normalize_display(name: &str) -> String {
     let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.matches(',').count() != 1 || collapsed.chars().any(is_cjk) {
+    if collapsed.matches(',').count() != 1 || is_cjk_name(&collapsed) {
         return collapsed;
     }
     let (surname, given) = collapsed.split_once(',').unwrap();
@@ -90,13 +114,13 @@ fn canonicalize<'a>(parts: impl Iterator<Item = &'a str>) -> Vec<String> {
 }
 
 /// The credits of bokai's parsed metadata, one per creator in order: Western
-/// names flipped, and a creator packing several names with 「、」 unpacked into
-/// one credit each, every one keeping the creator's roles.
+/// names flipped, and a creator packing several names (see [`unpack`]) unpacked
+/// into one credit each, every one keeping the creator's roles.
 pub fn from_metadata(meta: &bokai::Metadata) -> Vec<Credit> {
     meta.creators
         .iter()
         .flat_map(|c| {
-            canonicalize(c.name.split('、'))
+            canonicalize(unpack(&c.name).into_iter())
                 .into_iter()
                 .map(|name| Credit {
                     name,
@@ -115,9 +139,32 @@ pub fn from_author_line(author: &str) -> Vec<Credit> {
 }
 
 /// Canonical author list from a typed author line: names split on `&` or `「、」`,
-/// never on a comma, the `Surname, Given` separator.
+/// and on a comma between Han or Hangul names (see [`unpack`]); a comma in a Latin
+/// name is the `Surname, Given` separator.
 pub fn parse_input(s: &str) -> Vec<String> {
-    canonicalize(s.split(['&', '、']))
+    canonicalize(s.split('&').flat_map(unpack))
+}
+
+/// `credits` with every credit whose name packs several (see [`unpack`]) unpacked
+/// into one credit per name in its place, each keeping its roles; every other
+/// credit as it is.
+pub fn unpacked(credits: &[Credit]) -> Vec<Credit> {
+    credits
+        .iter()
+        .flat_map(|c| {
+            let names = unpack(&c.name);
+            if names.len() < 2 {
+                return vec![c.clone()];
+            }
+            canonicalize(names.into_iter())
+                .into_iter()
+                .map(|name| Credit {
+                    name,
+                    roles: c.roles.clone(),
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Split a stored author line back into its names, on `[&、]` only and with no flip.
@@ -130,14 +177,10 @@ pub fn split_display(author: &str) -> Vec<String> {
         .collect()
 }
 
-/// Join a canonical author list into the stored display string. All-CJK lists
-/// read better with `「、」`; everything else uses `" & "`.
+/// Join a canonical author list into the stored display string, as
+/// [`bokai::model::join_names`] joins a one-string author field.
 pub fn join_display(authors: &[String]) -> String {
-    if authors.len() > 1 && authors.iter().all(|a| a.chars().any(is_cjk)) {
-        authors.join("、")
-    } else {
-        authors.join(" & ")
-    }
+    bokai::model::join_names(authors)
 }
 
 /// Every credited name, in order: what a file stating no roles carries.
@@ -190,6 +233,62 @@ pub fn assign(credits: &[Credit], assigned: &[Credit]) -> Vec<Credit> {
         match out.iter_mut().find(|c| c.name == a.name) {
             Some(c) => c.roles = a.roles.clone(),
             None => out.push(a.clone()),
+        }
+    }
+    out
+}
+
+/// Names linked as one person, each keying the person's names in order; the first
+/// is the name the person sorts under. A name in none stands for a person of its own.
+#[derive(Debug, Clone, Default)]
+pub struct People {
+    by_name: HashMap<String, Arc<[String]>>,
+}
+
+impl People {
+    /// The registry of `groups`, each one person's names in order.
+    pub fn new(groups: Vec<Vec<String>>) -> Self {
+        let mut by_name = HashMap::new();
+        for group in groups {
+            let names: Arc<[String]> = group.into();
+            for name in names.iter() {
+                by_name.insert(name.clone(), names.clone());
+            }
+        }
+        Self { by_name }
+    }
+
+    /// The names of the person credited as `name`, in order: `name` alone when it
+    /// is linked to none.
+    pub fn names_of(&self, name: &str) -> Vec<String> {
+        match self.by_name.get(name) {
+            Some(names) => names.to_vec(),
+            None => vec![name.to_string()],
+        }
+    }
+}
+
+/// Each person `credits` names as an author, as that person's names, in credit
+/// order and once each: the people a book is by.
+pub fn author_people(credits: &[Credit], people: &People) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    for c in credits.iter().filter(|c| c.is_author()) {
+        let names = people.names_of(&c.name);
+        if !out.contains(&names) {
+            out.push(names);
+        }
+    }
+    out
+}
+
+/// Every name of every person `credits` names, in credit order and once each.
+pub fn every_name(credits: &[Credit], people: &People) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in credits {
+        for name in people.names_of(&c.name) {
+            if !out.contains(&name) {
+                out.push(name);
+            }
         }
     }
     out
@@ -294,6 +393,48 @@ mod tests {
                 Credit::with_roles("秋山次郎", &["edt"])
             ]
         );
+        // A comma between Han names separates them, ASCII or full-width.
+        for packed in ["春野一郎, 秋山次郎", "春野一郎，秋山次郎"] {
+            assert_eq!(
+                from_metadata(&meta(vec![bokai::Contributor::named(packed)])),
+                [Credit::named("春野一郎"), Credit::named("秋山次郎")],
+                "{packed}"
+            );
+        }
+        // A comma beside a Latin name is not a list, nor between the halves of a
+        // Western name written in katakana.
+        for one in ["Ann Writer, 春野一郎", "スミス，ジョン", "スミス, ジョン"] {
+            assert_eq!(
+                from_metadata(&meta(vec![bokai::Contributor::named(one)])),
+                [Credit::named(one)],
+                "{one}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_packed_credit_unpacks_in_place() {
+        let stored = [
+            Credit::named("Writer, Ann"),
+            Credit::with_roles("春野一郎, 秋山次郎", &["edt"]),
+            Credit::with_roles("Ivy Drawer", &["ill"]),
+        ];
+        assert_eq!(
+            unpacked(&stored),
+            [
+                Credit::named("Writer, Ann"),
+                Credit::with_roles("春野一郎", &["edt"]),
+                Credit::with_roles("秋山次郎", &["edt"]),
+                Credit::with_roles("Ivy Drawer", &["ill"]),
+            ],
+            "only the packed credit changes"
+        );
+        let canonical = [
+            Credit::named("春野一郎"),
+            Credit::named("春野一郎"),
+            Credit::named("スミス，ジョン"),
+        ];
+        assert_eq!(unpacked(&canonical), canonical);
     }
 
     #[test]
@@ -308,6 +449,10 @@ mod tests {
         assert_eq!(
             parse_input("春野一郎、秋山次郎"),
             vec!["春野一郎", "秋山次郎"]
+        );
+        assert_eq!(
+            parse_input("春野一郎, 秋山次郎 & Ann Writer"),
+            vec!["春野一郎", "秋山次郎", "Ann Writer"]
         );
         assert!(parse_input("   ").is_empty());
     }
@@ -403,6 +548,33 @@ mod tests {
                 Credit::with_roles("Ann Writer", &["aut", "dto"]),
                 Credit::with_roles("Ivy Drawer", &["ill"]),
             ]
+        );
+    }
+
+    #[test]
+    fn a_linked_name_stands_for_its_whole_person() {
+        let people = People::new(vec![vec!["Ann Writer".into(), "アン・ライター".into()]]);
+        let translated = [
+            Credit::with_roles("アン・ライター", &["aut"]),
+            Credit::with_roles("春野一郎", &["trl"]),
+        ];
+        assert_eq!(
+            author_people(&translated, &people),
+            [vec!["Ann Writer".to_string(), "アン・ライター".to_string()]]
+        );
+        assert_eq!(
+            every_name(&translated, &people),
+            ["Ann Writer", "アン・ライター", "春野一郎"]
+        );
+        let bilingual = [Credit::named("Ann Writer"), Credit::named("アン・ライター")];
+        assert_eq!(
+            author_people(&bilingual, &people).len(),
+            1,
+            "one person, however many of its names a book credits"
+        );
+        assert_eq!(
+            author_people(&[Credit::named("Bo Cowriter")], &People::default()),
+            [vec!["Bo Cowriter".to_string()]]
         );
     }
 

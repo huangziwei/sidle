@@ -1,6 +1,5 @@
-//! Series grouping — the picker's view model.
-//!
-//! The on-Kindle picker is **grouped by series, always** (no flat toggle):
+//! Series grouping, the picker's view model: the grid always groups books by
+//! series.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -8,20 +7,19 @@ use std::collections::HashMap;
 use crate::api::Book;
 use crate::collate::natural_compare;
 
-/// A top-level tile: either a standalone book or a series collection. Folded
+/// A top-level tile: a standalone book or a series collection.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Entry {
     /// A book with no series — rendered and downloaded as itself.
     Standalone(Book),
-    /// A series collection. `books` is in canonical within-series order, so `books[0]`
-    /// is the lead and a drill-in renders them in reading order.
+    /// A series collection, `books` in canonical within-series order: `books[0]` is
+    /// the lead.
     Series { name: String, books: Vec<Book> },
 }
 
-/// One grid cell in the current view, after a mode is resolved. The renderer
-/// and the tap handler both work off this, so top-level and drilled-in views
-/// share one code path (a drilled-in member is just a [`CellKind::Book`] cell).
+/// One grid cell in the current view, top-level or drilled-in; a drilled-in member
+/// is a [`CellKind::Book`] cell.
 #[derive(Debug)]
 pub struct Cell {
     /// The book whose cover art fills the tile: the book itself for a
@@ -36,13 +34,11 @@ pub enum CellKind {
     /// A plain book — long-press downloads it.
     Book,
     /// A series collection — a tap drills into its members. `count` is the
-    /// number of available-to-download members (the queue already hides
-    /// downloaded ones, so this is *not* the full-series total).
+    /// number of its members in the view.
     Series { name: String, count: usize },
 }
 
-/// A book's series identity, or `None` when it has none (→ stays standalone).
-/// Port of `seriesNameOf`: trim, and treat an all-whitespace name as absent.
+/// A book's trimmed series name; `None` for none or an all-whitespace one.
 pub fn series_name_of(b: &Book) -> Option<&str> {
     b.series_name
         .as_deref()
@@ -50,7 +46,8 @@ pub fn series_name_of(b: &Book) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Canonical within-series order: by `series_index` ascending (half-numbers
+/// Canonical within-series order: `series_index` ascending, indexed books before
+/// un-indexed ones, ties by title in natural order.
 pub fn by_series_index(a: &Book, b: &Book) -> Ordering {
     let an = a.series_index.filter(|x| x.is_finite());
     let bn = b.series_index.filter(|x| x.is_finite());
@@ -65,7 +62,8 @@ pub fn by_series_index(a: &Book, b: &Book) -> Ordering {
     }
 }
 
-/// Fold the already-filtered+sorted `view` into entries. A series collection
+/// Fold the filtered, sorted `view` into entries: a series collection sits where
+/// its first member appears, its books in [`by_series_index`] order.
 pub fn group_by_series(view: Vec<Book>) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
@@ -106,9 +104,7 @@ pub fn cells_for_top(entries: &[Entry]) -> Vec<Cell> {
                 cover_book: b.clone(),
                 kind: CellKind::Book,
             },
-            // A Series entry always holds ≥1 book (created with the first
-            // member), so `books[0]` — the lead after the eager index sort — is
-            // always present.
+            // A Series entry holds at least one book, its lead `books[0]`.
             Entry::Series { name, books } => Cell {
                 cover_book: books[0].clone(),
                 kind: CellKind::Series {
@@ -121,8 +117,7 @@ pub fn cells_for_top(entries: &[Entry]) -> Vec<Cell> {
 }
 
 /// Build the drilled-in tiles for one series: every member is a plain,
-/// downloadable [`CellKind::Book`] cell, in the order `members` arrives (which
-/// [`group_by_series`] already sorted by [`by_series_index`]).
+/// downloadable [`CellKind::Book`] cell, in the order `members` arrives.
 pub fn cells_for_series(members: &[Book]) -> Vec<Cell> {
     members
         .iter()
@@ -134,8 +129,7 @@ pub fn cells_for_series(members: &[Book]) -> Vec<Cell> {
 }
 
 /// The members of the series named `name` among `entries`, or `None` if no such
-/// collection exists (e.g. a drilled-in series filtered away → caller exits to
-/// the top level).
+/// collection exists.
 pub fn members_of<'a>(entries: &'a [Entry], name: &str) -> Option<&'a [Book]> {
     entries.iter().find_map(|e| match e {
         Entry::Series { name: n, books } if n == name => Some(books.as_slice()),
@@ -148,7 +142,6 @@ mod tests {
     use super::*;
 
     /// Minimal book with only the fields a given test sets; the rest default.
-    /// Mirrors the helper in `ui::sort` / `ui::filter` tests.
     fn book(id: i64) -> Book {
         Book {
             id,
@@ -156,6 +149,7 @@ mod tests {
             kfx_sha256: None,
             device_filename: None,
             author: String::new(),
+            author_people: Vec::new(),
             language: String::new(),
             publisher: None,
             series_name: None,
@@ -184,7 +178,7 @@ mod tests {
     }
 
     /// What kind each entry is, in order — `None` = standalone(id), `Some` =
-    /// series(name, member ids). Lets a test assert entry order + folding.
+    /// series(name, member ids).
     fn shape(entries: &[Entry]) -> Vec<(Option<&str>, Vec<i64>)> {
         entries
             .iter()
@@ -207,9 +201,9 @@ mod tests {
 
     #[test]
     fn folds_at_first_seen_position_preserving_view_order() {
-        // View order (already sorted upstream): SagaA, standalone, SagaB,
-        // SagaA-again, standalone2. The Saga collection sits where its FIRST
-        // member appeared (index 0); the later Saga book folds into it.
+        // View order: Saga, standalone, Abyss, Saga again, standalone. The Saga
+        // collection sits at its first member's slot (index 0); the later Saga
+        // book folds into it.
         let view = vec![
             with_series(1, "Saga", Some(2.0)),
             book(2),
@@ -251,8 +245,7 @@ mod tests {
 
     #[test]
     fn singleton_series_stays_a_collection() {
-        // Locked decision 2: a one-member series is still a series (the rest are
-        // just already downloaded / not present), never flattened to a book.
+        // A one-member series is a series, never flattened to a book.
         let entries = group_by_series(vec![with_series(1, "Lonely", Some(1.0))]);
         assert_eq!(shape(&entries), vec![(Some("Lonely"), vec![1])]);
         let cells = cells_for_top(&entries);
