@@ -462,6 +462,12 @@ The four classifications are genuinely distinct and co-occur within single books
 
 A source format that names its notes — EPUB 3 `epub:type` — maps straight onto the classification vocabulary. One that does not still marks them structurally, as a reciprocal pair of links: the reference points into the note body, and the note body points back into the block the reference sits in. That pair is what a converter has to recognise, since a one-way link is a cross-reference and gets no popup.
 
+A contents page in the text forms the same pair: each entry links to the title it opens, and the title links back to its entry — in either reading order, since some books place the contents after the text. So do an index's see-also entries, each naming the other. Marked as a note, one end opens the other in a popup instead of turning to it. Three facts separate the shapes:
+
+- In a contents pair each link is its block's whole content — the entry and the title are each nothing but a link to the other — while a note body answers its reference from within prose, even where the reference stands alone in its block.
+- A note body's link returns to the reference itself. A see-also returns to the other entry: a block whose text opens with the link's own.
+- A block that is a heading, or that the book's navigation targets — the block itself, or a node that is its whole content, such as the id on the link a title consists of — is a section title, never a note body. A navigation target inside prose does not count: some books name a note's own number to mark where a chapter's notes begin.
+
 ## 8. Style model
 
 ### 8.1. Style fragments

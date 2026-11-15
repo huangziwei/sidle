@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::import::ChapterId;
 use crate::model::notes::detect_notes;
-use crate::model::{AnchorTarget, Chapter, GlobalNodeId, NoteRole, Role};
+use crate::model::{AnchorTarget, Chapter, GlobalNodeId, LandmarkType, NoteRole, Role};
 
 /// Book-level link resolution result, from `Book::resolve_links`: every link
 /// node's target, the source nodes each target is named by, the hrefs that
@@ -174,7 +174,7 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
     // Step 2: Let the importer build format-specific anchor maps
     book.index_anchors(&chapters);
 
-    // Step 3: Resolve TOC hrefs (fills in fragments for AZW3/MOBI)
+    // Step 3: Resolve TOC hrefs, filling in the fragments they lack
     book.resolve_toc();
 
     // Step 4: Resolve TOC entry targets
@@ -233,9 +233,9 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
     Ok(resolved)
 }
 
-/// The `AnchorTarget::Internal` blocks named by `toc`, `page_list` and
-/// `landmarks`. Valid after `resolve_toc_targets`,
-/// `resolve_page_list_targets` and `resolve_landmark_targets`.
+/// The `AnchorTarget::Internal` nodes the `toc` entries and every landmark but
+/// `LandmarkType::Endnotes` open: where sections start. Valid after
+/// `resolve_toc_targets` and `resolve_landmark_targets`.
 fn nav_targets(book: &crate::model::Book) -> HashSet<GlobalNodeId> {
     fn walk(entries: &[crate::model::TocEntry], out: &mut HashSet<GlobalNodeId>) {
         for entry in entries {
@@ -248,8 +248,10 @@ fn nav_targets(book: &crate::model::Book) -> HashSet<GlobalNodeId> {
 
     let mut out = HashSet::new();
     walk(book.toc(), &mut out);
-    walk(book.page_list(), &mut out);
     for landmark in book.landmarks() {
+        if landmark.landmark_type == LandmarkType::Endnotes {
+            continue;
+        }
         if let Some(AnchorTarget::Internal(target)) = landmark.target {
             out.insert(target);
         }
